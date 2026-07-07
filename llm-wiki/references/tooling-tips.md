@@ -241,3 +241,31 @@ comment on each citation line. These are then processed by the `audit` operation
 
 The session-start staleness alert will suggest running this automatically when
 sha256 mismatches exist.
+
+---
+
+## Cross-project referencing
+
+A compiled vault is worth reusing from your *other* Claude Code projects — a coding repo,
+an assistant, a writing workflow — without duplicating its context into each one. The
+`wiki/hot.md` cache makes this cheap: it is a ~500-token recent-context summary, so another
+project can borrow the vault's state for the price of one small read.
+
+In the other project's `CLAUDE.md`, add a pointer like:
+
+```markdown
+## Wiki knowledge base
+Path: ~/path/to/vault
+
+When you need context this project doesn't already have:
+1. Read wiki/hot.md first (recent context, ~500 tokens).
+2. If that's not enough, read wiki/index.md (full catalog).
+3. For domain specifics, read wiki/index/<domain>.md, then drill into individual pages.
+
+Do NOT read the wiki for general coding questions, or for anything already in this
+project's own files or the current conversation.
+```
+
+The read order matters: `hot.md` (cheapest) → `index.md` → per-domain index → pages. Most
+lookups stop at step 1 or 2. The vault stays the single source of truth; every project
+reads from it instead of keeping its own drifting copy.

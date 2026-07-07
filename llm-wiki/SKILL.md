@@ -7,12 +7,13 @@ description: >-
   synthesis pages with line-level citations, splits large topics into
   divide-and-conquer folder hierarchies, and answers questions grounded in the
   compiled vault instead of re-reading raw docs each time — so knowledge
-  compounds across sessions instead of being rediscovered. Eight logged
-  operations: scaffold, ingest, batch_ingest, query, lint, audit, reflect,
+  compounds across sessions instead of being rediscovered. Nine logged
+  operations: scaffold, ingest, batch_ingest, save, query, lint, audit, reflect,
   compile. Use whenever someone works against their wiki, knowledge
   base, vault, or "second brain" — even casually: ingesting or adding a
   paper/article/note ("fold this into the wiki"), scaffolding a new knowledge
-  base, querying it ("based on my wiki, what do we know about X"),
+  base, saving the current chat or answer into the wiki ("save this", "keep this
+  conversation"), querying it ("based on my wiki, what do we know about X"),
   batch-ingesting a folder of files, running a lint or health check (dead links,
   orphans, stale pages), processing audit feedback or inline FIX comments,
   splitting or restructuring an overgrown page, comparing two things from the
@@ -56,17 +57,20 @@ Execute in this order at the start of every session:
    preference lives in each skill's own `description` (and `CLAUDE.md` for
    safety-critical routing). Stable user preferences and
    learned rules live in `CLAUDE.md` (§ Notes for the LLM).
-3. **Read `wiki/index.md`** — current state of the knowledge base.
-4. **Read last entry of `log/`** — `ls log/ | tail -1`, then read the file.
-5. **Check `audit/`** — if any `*.md` files exist (not `.gitkeep`), note the
+3. **Read `wiki/hot.md`** — the recent-context cache (~400 words). This is the
+   fastest way to resume: it summarizes the last thing done, key recent facts, and
+   open threads, so you rarely need to crawl further. See § Hot cache.
+4. **Read `wiki/index.md`** — current state of the knowledge base.
+5. **Read last entry of `log/`** — `ls log/ | tail -1`, then read the file.
+6. **Check `audit/`** — if any `*.md` files exist (not `.gitkeep`), note the
    count and mention it to the user.
-6. **Staleness alert** — run:
+7. **Staleness alert** — run:
    ```bash
    python3 .claude/skills/llm-wiki/scripts/lint_wiki.py <wiki-root> --stale-only
    ```
    If any pages are returned, show the list and ask: "These concept pages
    haven't been reviewed recently — want me to add them to the freshen queue?"
-7. **qmd status** (only if `search_tool: qmd` in `CLAUDE.md` `## Search`; off by default):
+8. **qmd status** (only if `search_tool: qmd` in `CLAUDE.md` `## Search`; off by default):
    ```bash
    qmd status
    ```
@@ -107,6 +111,7 @@ then execute the scaffold script as directed there.
 │   ├── index/             ← Full per-domain catalogs (auto-generated)
 │   │   ├── <domain-a>.md
 │   │   └── <domain-b>.md
+│   ├── hot.md             ← Recent-context cache (rolling ~400-word summary; read first)
 │   ├── overview.md        ← Health dashboard
 │   ├── QUESTIONS.md       ← Open questions queue
 │   ├── sources/           ← Per-source summary pages
@@ -126,6 +131,7 @@ then execute the scaffold script as directed there.
 | `raw/`                       | Human  | IMMUTABLE. LLM reads only, never modifies.                                    |
 | `<private-zone>/` (if any)   | Human  | NEVER read directly (`Read`/`cat`/etc.). Sensitive data; pipeline-only access. See `CLAUDE.md` § Private zones. |
 | `wiki/`                      | LLM    | LLM fully owns. Human browses, does not edit.                                 |
+| `wiki/hot.md`                | LLM    | Rolling recent-context cache; overwritten each session. Read FIRST at session start. See § Hot cache. |
 | `outputs/`                   | LLM    | All answers persist here. Never lost in chat.                                 |
 | `log/`                       | LLM    | Append-only operation log.                                                    |
 | `audit/`                     | Shared | Human writes feedback; LLM processes it.                                      |
@@ -136,6 +142,26 @@ Skill dispatch is native (by each skill's `description`); cross-skill preference
 safety-critical routing live in those descriptions and `CLAUDE.md`. Stable user
 preferences and learned rules also live in `CLAUDE.md` (§ Notes for the LLM). A
 multi-step procedure that recurs belongs in its own skill rather than bloating this one.
+
+---
+
+## Hot cache
+
+`wiki/hot.md` is a rolling ~400-word summary of recent context — the last thing done,
+the key recent facts, what changed, and any open threads. It exists so a new session
+resumes instantly without crawling the full index, and so **another project can borrow
+this vault's context cheaply** (read `hot.md` first, ≈500 tokens, before the index — see
+`references/tooling-tips.md` § Cross-project referencing).
+
+It is a **cache, not a journal**: overwrite it completely each time and keep it short.
+Refresh it after every state-changing operation — `ingest`, `save`, `batch_ingest`, a
+substantive `query`, `reflect`, `compile` — and at session end. `build_index.py` never
+touches it; the LLM owns it. It carries `type: system-hot` + `graph-excluded: true`, and
+lint skips it (it is in `SYSTEM_FILES`), so it never surfaces as an orphan or stale page.
+
+If `hot.md` ever contradicts a compiled page, **trust the page** — the cache can lag.
+Structure: `## Last updated` · `## Key recent facts` · `## Recent changes`
+(Created / Updated / Flagged wikilinks) · `## Active threads`.
 
 ---
 
@@ -195,10 +221,13 @@ Compile concepts, verify specifics fresh.
 
 ---
 
-## The eight operations
+## The nine operations
 
-Every action on the wiki is one of these eight. Each appends an entry to the
-current day's log file (`log/YYYYMMDD.md`). See `references/log-guide.md`.
+Every action on the wiki is one of these nine. Each appends an entry to the
+current day's log file (`log/YYYYMMDD.md`). See `references/log-guide.md`. The
+heaviest three (`ingest`, `query`, `lint`) keep a load-bearing summary here and
+push their full step-by-step into `references/ops/op-*.md` — read that file when
+you run the operation.
 
 ### 1. `scaffold`
 
@@ -242,100 +271,33 @@ After scaffolding:
 
 **Trigger words:** ingest, process this, add this source
 
-Add a new source to the knowledge base.
+Add one source to the knowledge base. Default: the agent reads the raw source
+**directly** (no preprocessing skill in front) and compiles it into wiki pages; if the
+vault's `CLAUDE.md` mandates a preprocess/safety step for a source type, follow that
+first. For a large source, scaffold before you summarize (§ Divide-and-conquer).
 
-**Step 1 — Run the bookkeeping script:**
 ```bash
 python3 .claude/skills/llm-wiki/scripts/fast_ingest.py <wiki-root> <raw-file-path>
 ```
 
-This is the **default ingest**: the agent reads the raw source **directly** — no
-preprocessing skill in front of it — and compiles it into wiki pages. For a large source, scaffold first (see § Divide-and-conquer): outline the sections, then distill each. `fast_ingest.py` only does bookkeeping (hash, slug, stub); it does not transform the source. If the vault's `CLAUDE.md` requires a preprocessing or safety step for a source type, that overrides this default — follow it first.
+`fast_ingest.py` does bookkeeping only — SHA-256, slug, source-type detection, and a
+stub at `wiki/sources/<slug>.md` (it warns if the stub exists; delete to re-ingest).
+Then read the raw file, fill the stub, and compile concepts/entities/comparisons. Two
+rules are load-bearing and easy to skip:
 
-The script:
-- Computes SHA-256 hash
-- Generates a URL-friendly slug
-- Detects source type (personal-writing vs external)
-- Creates a stub file at `wiki/sources/<slug>.md` with pre-filled YAML frontmatter
-- Prints instructions telling you what to do next
+- **Concept alignment (before creating any concept page):** map the concept to an English
+  lowercase-hyphen slug, then search `wiki/concepts/` **and** existing pages' `aliases`
+  (in *either* language) — if it already exists, UPDATE it; never create a near-duplicate.
+- **Verify-fresh specifics:** every number / date / percentage / threshold / exact quote
+  goes verbatim into the stub's `claims_requiring_verification` (lint check 13 re-verifies
+  each string against the raw file).
 
-If the stub already exists, the script will warn — delete it first to re-ingest.
+After filling pages: rebuild the index (`build_index.py`), refresh `wiki/hot.md`, check
+`wiki/QUESTIONS.md`, and log `## [HH:MM] ingest | <slug> — … (touched N pages)`.
 
-**Step 2 — Read the raw file and fill in the stub:**
-- Write the Summary section (2-4 sentences, every claim cited)
-- Write Key Points (each with line citation)
-- Extract concepts and entities
-- If source `date` is more than 2 years before today, set `possibly_outdated: true` in frontmatter
-- If source contains **any number, date, percentage, or threshold**, populate
-  `claims_requiring_verification` with each one verbatim:
-  ```yaml
-  claims_requiring_verification:
-    - "2% discount if paid within 10 days" (raw/contracts/vendor.md, L14)
-    - "deadline: 2026-03-31" (raw/contracts/vendor.md, L22)
-  ```
-  lint check 13 will verify each string exists in the raw file at every lint run.
-
-**Step 3 — Concept alignment (mandatory before creating any concept page):**
-- Map each concept to an English lowercase-hyphen slug (map a Chinese-only name to its
-  English slug, e.g. `第一性原理` → `first-principles-thinking`)
-- Search `wiki/concepts/` for that slug
-- Scan existing concept pages' `aliases` fields for a match in **either language**
-  (Chinese↔Chinese, English↔English, Chinese↔English) — the idea may already live under
-  a different-language alias or synonym
-- If match found (slug OR any alias): UPDATE existing page, do not create a near-duplicate
-- If no match: CREATE new page using `wiki/templates/concept-template.md`, filling
-  `aliases` with **both the Chinese and English names** (+ synonyms)
-
-**Step 4 — For each concept (create or update):**
-- Set `title:` to the **primary-language name** (whichever language `CLAUDE.md`
-  § Bilingual format names as primary); the `# H1` / first line leads with the primary
-  language and annotates the secondary in `（）` (Chinese-primary vault: `中文名（English Name）`)
-- Add source to Sources section
-- Append to Evolution Log: `YYYY-MM-DD (N sources): 强化/修正/新增分歧 — <one-liner>`
-- Update `source_count`, `last_reviewed`, `updated`; keep `aliases` complete & bilingual
-- Write **all prose and all section headings** in the primary language only — Chinese in a
-  Chinese-primary vault (`## 描述`, `## 要点`), never bilingual headings like `## 描述（Description）`
-- Apply the bilingual pair `primary（secondary）` (e.g. `中文（English）`) ONLY to the page title
-  and a technical term's first appearance — not to section headings or ordinary prose — per article-guide
-- Apply line citations to every factual claim
-
-**Step 5 — For each entity:** same logic as concepts.
-
-**Step 5b — Comparisons (create when source explicitly compares two things):**
-
-Create `wiki/comparisons/<a>-vs-<b>.md` (using `wiki/templates/comparison-template.md`) when:
-- The source performs a direct pairwise comparison (two methods, two tools, two approaches)
-- A query answer synthesizes a comparison worth reusing across future queries
-- The difference is too structural to fit in either concept's Contradictions section
-
-Use `[[comparisons/<a>-vs-<b>]]` wikilinks in both concept pages so the graph stays connected.
-Do NOT create a comparisons page for general multi-source synthesis — that goes in `wiki/synthesis/`.
-
-**Step 6 — Rebuild index:**
-```bash
-python3 .claude/skills/llm-wiki/scripts/build_index.py <wiki-root>
-```
-This regenerates `wiki/index.md` and `wiki/index/<domain>.md` automatically.
-You do NOT manually update `wiki/index.md` after this step.
-
-**Step 7 — Update search index** (only if `search_tool: qmd` in CLAUDE.md `## Search`):
-```bash
-qmd embed
-```
-This rebuilds vector embeddings so the new source is immediately queryable.
-
-**Step 8 — Check wiki/QUESTIONS.md:** if this source answers an open question, notify user.
-
-**Step 9 — Log:** append to `log/YYYYMMDD.md`:
-```
-## [HH:MM] ingest | <slug> — <one-line description> (touched N pages)
-```
-
-**Personal Writing Flow** (detected automatically by `fast_ingest.py`):
-- Skip Summary section — no objective summary of your own writing
-- Extract core argument → write into concept pages' "My Position"
-- Do NOT increment `source_count` (no self-citation bias)
-- SHA-256 still recorded
+**Full step-by-step — frontmatter fields, bilingual title rules, comparison triggers,
+the personal-writing flow, and the qmd re-embed step — is in `references/ops/op-ingest.md`.
+Read it when you ingest.**
 
 ### 3. `batch_ingest`
 
@@ -372,103 +334,81 @@ Rule of thumb: a batch of N related sources should produce roughly N–2N fleshe
 concept pages, not 5N one-line stubs. A concept page without an Evolution Log or
 cross-source synthesis is an ingest TODO, not a finished page.
 
+After the batch is fully compiled, rebuild the index and refresh `wiki/hot.md` once.
+
 Log: `## [HH:MM] batch_ingest | N files processed, M already ingested`
 
-### 4. `query`
+### 4. `save`
+
+**Trigger words:** save this, save that answer, keep this, file this conversation, save to wiki
+
+Persist the current chat — an answer, an insight, a decision — into the wiki so it doesn't
+vanish into history. `save` honors the same source-of-truth rule as `ingest`: knowledge is
+only trustworthy if it traces to an immutable artifact. So `save` is a thin wrapper over
+`ingest`, not a separate writing path.
+
+1. **Decide what to save** — the whole conversation, or one specific answer. Ask only if ambiguous.
+2. **Materialize it to `raw/`** — write the content verbatim to
+   `raw/personal/YYYY-MM-DD-<slug>.md` with short frontmatter (`title`, `date`,
+   `type: personal-writing`). This makes it hashable and citable — a real source, not a
+   floating note.
+3. **Ingest it** —
+   ```bash
+   python3 .claude/skills/llm-wiki/scripts/fast_ingest.py <wiki-root> raw/personal/YYYY-MM-DD-<slug>.md
+   ```
+   The `raw/personal/` path auto-selects the personal-writing flow (no `source_count`
+   bump, no self-citation bias; SHA-256 still recorded).
+4. **Compile** — fill the stub's Core Argument / Key Claims and route insights into concept
+   pages' "My Position", cross-linking entities/concepts. Claims drawn from external sources
+   you discussed keep their `(raw/…, Lxx)` citations; your own reasoning is `[synthesis]`.
+5. **Finish like any ingest** — rebuild the index, refresh `wiki/hot.md`, log
+   `## [HH:MM] save | <slug> — <one-liner>`.
+
+If the user explicitly wants only a quick durable note ("don't make a wiki page"), stop
+after step 2. But the default is the full flow — an uncompiled note doesn't compound.
+
+### 5. `query`
 
 **Trigger words:** direct question, "based on my knowledge base", "what does the wiki say"
 
-Answer a question **grounded in the wiki**, not general knowledge.
+Answer grounded in the wiki, not general knowledge. Navigate the index (qmd if
+`search_tool: qmd` is set in `CLAUDE.md`, else scan `wiki/index.md` → for a large wiki drill
+into `wiki/index/<domain>.md`), read the identified pages in full, follow one level of
+wikilinks, and also check `wiki/comparisons/`. Every claim traces to a specific source page.
+**Verify specifics (numbers / dates / quotes / legal-financial terms) against the cited
+`raw/` source**, not the compiled value (§ Compile vs. verify-fresh). If the wiki lacks the
+material, say so and suggest what to ingest — then, if you answer from general knowledge,
+clearly mark which parts are not from the wiki.
 
-**Index navigation — try in order, stop at first success:**
+Save the answer to `outputs/queries/YYYY-MM-DD-<slug>.md`; if it has reuse value, promote it
+to `wiki/concepts/`. Refresh `wiki/hot.md` if the exchange was substantive. End with
+**Confidence Notes** listing low/medium-confidence citations. Log `## [HH:MM] query | <slug>`.
 
-**Path A — qmd** (only if `search_tool: qmd` in CLAUDE.md `## Search`; off by default):
-```bash
-qmd query "<question>" -c <qmd_collection> -n 5   # qmd_collection: read from CLAUDE.md ## Search
-```
-Read returned pages in full; follow one level of wikilinks.
-Also check `wiki/comparisons/` for relevant pairwise analysis.
-If qmd is unreachable → fall through to Path B immediately.
+**Output formats (prose / table / Marp slides / matplotlib / list) and the full navigation
+detail are in `references/ops/op-query.md`.**
 
-**Path B — Index scanning** (default fallback):
-- **Small wiki** (page count < `search_tool_threshold`, default 50):
-  Read `wiki/index.md` directly. Scan for relevant pages.
-- **Large wiki** (≥ threshold):
-  Read `wiki/index.md` → identify relevant domain → read `wiki/index/<domain>.md` → navigate to pages.
-
-Steps:
-1. Navigate via index (Path A or B above)
-2. Read identified pages in full; follow one level of wikilinks.
-   Also check `wiki/comparisons/` for any relevant pairwise analysis.
-3. If the wiki doesn't have enough material, say so. Suggest what to ingest.
-4. Synthesize answer. Every claim traces to a specific source page.
-5. Save to `outputs/queries/YYYY-MM-DD-<question-slug>.md`.
-6. If answer has reuse value → promote to `wiki/concepts/`, add to `index.md`.
-7. Log: `## [HH:MM] query | <question-slug>`
-
-**Synthesis-time routing.** For any answer that turns on a specific number, date,
-percentage, threshold, exact quote, or legal/financial term, verify against the
-cited `raw/` source rather than trusting the compiled value — see § Compile vs.
-verify-fresh.
-
-Note confidence level. Explicitly flag conflicts between sources.
-End with **Confidence Notes** listing all low/medium-confidence citations.
-
-**Output format:**
-- General → Markdown prose
-- Comparison → Markdown table
-- Presentation → Marp slides (`marp: true` in frontmatter)
-- Data/trends → Python matplotlib code block
-- List → Structured bullet list
-
-### 5. `lint`
+### 6. `lint`
 
 **Trigger words:** lint, health check, check wiki
 
 ```bash
-python3 .claude/skills/llm-wiki/scripts/lint_wiki.py <wiki-root>
+python3 .claude/skills/llm-wiki/scripts/lint_wiki.py <wiki-root>   # 13+ checks → outputs/lint-YYYY-MM-DD.md
 ```
+Flags: `--stale-only` (fast; used at session start), `--structural` (skip the
+uncited-claims check on large wikis). After running, show the error / warning / suggestion
+counts, then act on the findings:
 
-The script runs 12+ checks. Output: `outputs/lint-YYYY-MM-DD.md`.
+- `ERROR: sha256` (raw source changed) → `cascade_flag.py <wiki-root>` writes
+  `<!-- FIX -->` on every citation to a modified source.
+- `broken-links` → `fix_links.py <wiki-root>` (dry run), then `--apply --stub` to repair and
+  stub missing targets; re-run lint to confirm it's clear.
 
-**Flags:**
-- `--stale-only` — only report stale pages (fast; used by session-start routine)
-- `--structural` — skip uncited-claims check (faster for large wikis)
+Log `## [HH:MM] lint | N issues found, M fixed`.
 
-After running:
-1. Show the user the summary (errors / warnings / suggestions count).
-2. If `ERROR: sha256` errors exist, ask whether to propagate FIX comments:
-   ```bash
-   python3 .claude/skills/llm-wiki/scripts/cascade_flag.py <wiki-root>
-   ```
-   This writes `<!-- FIX: raw source changed — re-verify -->` on all citation
-   lines in wiki pages that reference a modified source file.
-3. If `broken-links` errors or warnings exist, run the maintainer (deterministic repair):
-   ```bash
-   python3 .claude/skills/llm-wiki/scripts/fix_links.py <wiki-root>               # dry run — preview
-   python3 .claude/skills/llm-wiki/scripts/fix_links.py <wiki-root> --apply --stub  # repair + stub missing targets
-   ```
-   `fix_links.py` is the repair counterpart to lint's detection. It auto-fixes wrong-category and
-   wrong-slug links (normalising both the link's category and slug to the target page's real filename
-   turns a near-miss into an exact match), and with `--stub` creates minimal placeholder pages for genuinely missing targets so
-   the link resolves and the page is flagged for filling. It reports anything ambiguous as `UNRESOLVED`
-   for you to decide, and quarantines template-placeholder tokens. Re-run `lint_wiki.py` after to confirm
-   `broken-links` is clear. (Trigger words: fix links, repair links, maintain.)
-4. Ask whether to fix other flagged issues.
-5. If `search_tool: qmd` in CLAUDE.md `## Search`, re-sync the search index:
-   ```bash
-   qmd update
-   ```
-6. Log: `## [HH:MM] lint | N issues found, M fixed`
+**Deep lint** (trigger "deep lint", ~monthly — reads 5 random source pages against their
+raw files) and the full post-run playbook are in `references/ops/op-lint.md`.
 
-**Deep Lint** (trigger: "deep lint" — monthly):
-1. Randomly select 5 source summary pages from `wiki/sources/`.
-2. Read each alongside its `raw_file`.
-3. Compare every factual claim sentence-by-sentence against the raw source.
-4. Report deviations. Fix immediately.
-5. Log: `## [HH:MM] lint | deep-lint — N deviations found in 5 pages`
-
-### 6. `audit`
+### 7. `audit`
 
 **Trigger words:** audit, process feedback, check comments, fix errors
 
@@ -491,7 +431,7 @@ For each piece of feedback:
 5. For inline FIX comments: remove the comment after applying the fix.
 6. Log: `## [HH:MM] audit | resolved <id> — <one-liner>`
 
-### 7. `reflect`
+### 8. `reflect`
 
 **Trigger words:** reflect, 综合分析, 发现规律
 
@@ -501,9 +441,9 @@ Suggested: monthly, or after every 10 new sources.
 Read `references/ops/op-reflect.md` for the full procedure:
 Stage 0 (reverse validation) → Stage 1 (pattern scan) → Stage 2 (synthesis) → Stage 3 (gap report).
 
-After all stages: update `wiki/overview.md`, rebuild index, log.
+After all stages: update `wiki/overview.md`, rebuild index, refresh `wiki/hot.md`, log.
 
-### 8. `compile`
+### 9. `compile`
 
 **Trigger words:** compile, restructure, clean up the wiki, split, merge
 
@@ -513,7 +453,7 @@ After all stages: update `wiki/overview.md`, rebuild index, log.
 present the full plan, **wait for user confirmation** before any writes.
 
 **Phase 2 — Restructuring:** execute splits (create sub-pages, update wikilinks), merges
-(single canonical page, keep old slug as redirect), rebuild index.
+(single canonical page, keep old slug as redirect), rebuild index, refresh `wiki/hot.md`.
 
 ```bash
 python3 .claude/skills/llm-wiki/scripts/build_index.py <wiki-root>
@@ -596,6 +536,7 @@ is the Chinese name, `aliases` holds both languages, and slugs/wikilinks stay En
 | ingest raw/...           | INGEST (script + steps; default reads source directly) |
 | ingest *.pdf             | INGEST — default direct read; vault `CLAUDE.md` may mandate a preprocess step |
 | batch / multiple files   | BATCH_INGEST (batch_ingest.py)                      |
+| save this / keep this conversation / file this answer | SAVE — materialize chat to `raw/personal/`, then ingest |
 | Direct question          | QUERY — check wiki first                            |
 | lint / health check      | LINT script                                         |
 | deep lint                | Deep Lint (5 pages vs raw source)                   |
@@ -649,5 +590,8 @@ knowledge — clearly distinguishing between the two.
 - `references/audit-guide.md` — audit file format, anchor strategy, inline FIX comments, processing workflow
 - `references/tooling-tips.md` — qmd setup, Obsidian config, web viewer
 - `references/scaffold-wizard.md` — first-time setup interview (Questions 1–4: domains, primary language, secondary language, semantic search + scaffold command)
+- `references/ops/op-ingest.md` — full ingest step-by-step (also used by `save` and stub-filling in `batch_ingest`)
+- `references/ops/op-query.md` — full query navigation + output formats
+- `references/ops/op-lint.md` — full lint post-run playbook + deep lint
 - `references/ops/op-reflect.md` — full reflect procedure (Stage 0–3)
 - `.claude/skills/<name>/SKILL.md` — auto-discovered by Claude Code; cross-skill preferences live in each skill's `description`

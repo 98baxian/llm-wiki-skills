@@ -44,7 +44,7 @@ from collections import defaultdict
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-SYSTEM_FILES = {"index.md", "log.md", "overview.md", "QUESTIONS.md"}
+SYSTEM_FILES = {"index.md", "log.md", "overview.md", "QUESTIONS.md", "hot.md"}
 WIKILINK_RE = re.compile(r"\[\[([^\]|#]+)(?:[|#][^\]]*)?]]")
 LOG_FILENAME_RE = re.compile(r"^(\d{4})(\d{2})(\d{2})\.md$")
 FRONTMATTER_RE = re.compile(r"^---\n(.*?)\n---\n", re.DOTALL)

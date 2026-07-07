@@ -175,8 +175,8 @@ What this wiki deliberately excludes:
 {private_block}
 ## Operations
 
-This wiki follows the llm-wiki skill's eight operations:
-`scaffold`, `ingest`, `batch_ingest`, `query`, `lint`, `audit`, `reflect`, `compile`.
+This wiki follows the llm-wiki skill's nine operations:
+`scaffold`, `ingest`, `batch_ingest`, `save`, `query`, `lint`, `audit`, `reflect`, `compile`.
 Every operation appends an entry to `log/YYYYMMDD.md`.
 
 ## Naming conventions
@@ -322,6 +322,34 @@ graph-excluded: true
     _write(root, "wiki/QUESTIONS.md", questions_md)
     print("✓ Created wiki/QUESTIONS.md")
 
+    # ── wiki/hot.md (recent-context cache) ────────────────────────────────────
+    hot_md = f"""---
+type: system-hot
+graph-excluded: true
+updated: {today_iso}
+---
+
+# Hot Cache
+
+> Rolling ~400-word summary of recent context. The LLM OVERWRITES this after
+> ingest / save / significant query and at session end — it is a cache, not a
+> journal. Read it first at session start to resume without crawling the vault.
+
+## Last updated
+{today_iso} — scaffolded. No sources ingested yet.
+
+## Key recent facts
+*(none yet)*
+
+## Recent changes
+*(none yet)*
+
+## Active threads
+- Vault just created. Suggested next step: ingest the first source.
+"""
+    _write(root, "wiki/hot.md", hot_md)
+    print("✓ Created wiki/hot.md")
+
     # ── Templates ─────────────────────────────────────────────────────────────
     _write_templates(root, today_iso)
     print("✓ Created wiki/templates/ (6 templates, incl. comparison-template)")
@@ -333,6 +361,7 @@ graph-excluded: true
 - Created directory tree (raw/, wiki/, log/, audit/, outputs/)
 - Created CLAUDE.md schema template (single config + schema file)
 - Created wiki/index.md category skeleton
+- Created wiki/hot.md, wiki/overview.md, wiki/QUESTIONS.md
 - Created 6 page templates (incl. comparison-template)
 - Domains: {', '.join(d.strip() for d in domains)}
 - Language: {lang_note}

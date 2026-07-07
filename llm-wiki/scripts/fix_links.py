@@ -52,7 +52,7 @@ import difflib
 from pathlib import Path
 from collections import defaultdict
 
-SYSTEM_FILES = {"index.md", "log.md", "overview.md", "QUESTIONS.md"}
+SYSTEM_FILES = {"index.md", "log.md", "overview.md", "QUESTIONS.md", "hot.md"}
 WIKILINK_RE = re.compile(r"\[\[([^\]|#]+)(?:[|#][^\]]*)?]]")
 
 # Tokens that appear verbatim in wiki/templates/*.md. A link to one of these means an

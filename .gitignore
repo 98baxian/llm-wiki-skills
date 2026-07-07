@@ -16,3 +16,10 @@ venv/
 *.swp
 .idea/
 .vscode/
+
+# Secrets
+.env
+*.env
+
+# Skill-creator eval scratch (fixtures, produced vaults, viewer, benchmark)
+llm-wiki-workspace/

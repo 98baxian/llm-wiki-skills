@@ -41,8 +41,8 @@ What this wiki deliberately excludes:
 - <bullet list>
 
 ## Operations
-This wiki follows the llm-wiki skill's eight operations:
-`scaffold`, `ingest`, `batch_ingest`, `query`, `lint`, `audit`, `reflect`, `compile`.
+This wiki follows the llm-wiki skill's nine operations:
+`scaffold`, `ingest`, `batch_ingest`, `save`, `query`, `lint`, `audit`, `reflect`, `compile`.
 
 ## Naming conventions
 - **Source pages** (`wiki/sources/`): kebab-case slug
@@ -264,15 +264,20 @@ All system files must include `graph-excluded: true`:
 
 ```yaml
 ---
-type: system-index        # or system-overview, system-questions, domain-index
+type: system-index        # or system-overview, system-questions, system-hot, domain-index
 graph-excluded: true
 updated: YYYY-MM-DD
-generated_by: scripts/build_index.py  # for auto-generated files
+generated_by: scripts/build_index.py  # for auto-generated files only
 ---
 ```
 
 Applies to: `wiki/index.md`, `wiki/index/*.md`, `wiki/overview.md`,
-`wiki/QUESTIONS.md`, all `outputs/` files.
+`wiki/QUESTIONS.md`, `wiki/hot.md`, all `outputs/` files.
+
+`wiki/hot.md` (`type: system-hot`) is the recent-context cache — the LLM overwrites it
+(not `build_index.py`), so it has no `generated_by`. It is in `lint_wiki.py`'s
+`SYSTEM_FILES`, so lint never treats it as an orphan or stale concept. See SKILL.md
+§ Hot cache.
 
 ---
 
