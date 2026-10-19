@@ -18,26 +18,29 @@ have nothing to check against.
 
 - docx / pptx / html conversion.
 - Remote parsing (`mineru-kit --remote`, mineru.net). Documents would be uploaded; never implicit.
-- MinerU `content_list.json` (not verified to exist in 4.0.12 kit output; kit formats are
-  `markdown | middle_json | zip`).
+- MinerU `content_list.json` (absent from the 4.0.12 zip output) and `structured_content.json`
+  (present, but `middle_json.json` is the documented source and is enough).
 - Quote verification itself (Spec B).
 
 ## 2. Verified facts this design rests on
 
-Measured on this machine, MinerU 4.0.12, `mineru-kit parse`, tier `basic` (CPU), first 3 pages of a
-22-page two-author preprint (single column):
+Measured on this machine, MinerU 4.0.12, `mineru-kit parse`, tier `basic` (CPU). Two corpora:
+(a) first 3 pages of a 22-page single-column preprint; (b) pages 1-6 of BERT (arXiv 1810.04805v2,
+ACL two-column format, one table, some formulas).
 
 | Fact | Evidence |
 |---|---|
-| Default markdown embeds base64 images: 297 KB for 3 pages, 8 KB after stripping | measured |
-| `-f middle_json` → schema `docvortex.middle` 2.0: `pages[].page_idx`, `pages[].blocks[]` with `type` (`header`, `footer`, `doc_title`, `text`, `image`, `paragraph_title`, …), `bbox`, `content`; `metadata.producer.version` | measured |
-| Headers/footers are not in the markdown; `*`, `~` are backslash-escaped in it | measured |
-| Block→line matching, body blocks only, after unescape + whitespace + lowercase: 17 of 18 matched; the miss was a page-number text block. First-occurrence matching mis-assigned one block, so the search must move forward from the previous match | measured |
-| Speed ≈ 0.6 page/s plus ≈ 5 s start-up (3 pages ≈ 10 s wall) | measured |
+| `-f zip` writes in **one pass**: `markdown.md`, `middle_json.json`, `structured_content.json`, `model_output.json`, `images/`. In `markdown.md` images are already files (`![](images/page_2_image_4.jpg)`): 8 KB for 3 pages, against 297 KB for the default markdown, which embeds base64 | measured (a) |
+| `middle_json.json`: schema `docvortex.middle` 2.0, `pages[].page_idx` (**absolute** PDF page index even when `-p` selects a range), `pages[].blocks[]` with `type`, `bbox`, `content`; `metadata.producer.version` | measured (a), (b) |
+| Block types seen: `header`, `footer`, `doc_title`, `text`, `paragraph_title`, `aside_text`, `image`, `page_footnote`, `table` | measured |
+| **Not in the markdown**: `header`, `footer`, page numbers and `page_footnote` (11 of 12 footnote blocks missing). `*`, `~` are backslash-escaped. A `table` block is HTML in `middle_json` but a pipe table in the markdown, so its text cannot be matched directly | measured |
+| Alignment (forward search from the previous match, normalized, body blocks only): (a) 17/18; (b) pp.1-2 24/25, pp.3-6 text/title/image blocks 35/40 before folding curly apostrophes; monotone in every chunk | measured |
+| Speed ≈ 0.6 page/s plus ≈ 5 s start-up; 2 pages ≈ 8 s, peak RSS 1.0 GB; 4 pages (pp.3-6) peak ≥ 2.7 GB | measured |
+| **A 4-page run was SIGKILLed** (rc -9 / 137) in this session because its cgroup has `memory.max` = 10 GB shared with other processes; the same pages succeed as two 2-page runs (peak 1.8 / 2.0 GB). The limit is environmental, but any machine can be in the same position | measured |
 | torch and mineru's llama-cpp native libraries crash if loaded in one process | measured earlier, see mcp-management.md |
 
-**Not tested**: two-column reading order, tables, formulas, scanned PDFs, `standard`/`advanced`
-tiers on this corpus. Claims about those are expectations, not facts.
+**Not tested**: scanned PDFs, formulas as such (the kit ran formula recognition on pp.3-6), `standard`
+and `advanced` tiers, CJK PDFs. Claims about those are expectations, not facts.
 
 Repo facts (read from `83e4331`): citations are `(raw/…, Lxx)`; lint check 14 forbids
 `[[sources/…]]` as inline citation; check 13 matches `verbatim in raw_text` exactly; check 5 compares
@@ -91,13 +94,18 @@ raw/converted/<slug>/
   <slug>.md              images are files, links are relative: ![](images/fig-001.png)
   <slug>.pages.json      page → line range (below)
   <slug>.convert.json    provenance
-  <slug>.dropped.txt     text of header/footer/page-number blocks the markdown omits (MinerU only)
+  <slug>.dropped.txt     text of header/footer/page-number/page_footnote blocks the markdown omits (MinerU only)
   images/
 ```
 
+`<slug>` comes from the **PDF filename**, sanitized (Unicode letters and digits kept, every other
+run of characters becomes `-`, suffixed with the first 8 hex of the PDF sha256 on collision). It is
+passed explicitly to `fast_ingest.py`, which keeps deriving the wiki-page slug from the title as it
+does today; the two slugs may differ, because the stub records the explicit `raw_file` path.
+
 `dropped.txt` is one block per line prefixed `p<N>\t<type>\t`, de-duplicated per page. It is
-never cited as a line source; it exists so Spec B can still find DOIs, preprint ids and running
-titles that sit in page margins.
+never cited as a line source; it exists so Spec B can still find DOIs, preprint ids, running
+titles and footnote URLs that sit outside the body text.
 
 Citation format is unchanged: `(raw/converted/<slug>/<slug>.md, L14-22)`.
 
@@ -120,12 +128,15 @@ Citation format is unchanged: `(raw/converted/<slug>/<slug>.md, L14-22)`.
 
 ### Page map construction
 
-- **MinerU**: run a second `-f middle_json` pass (or the single `zip` output if it contains both;
-  to be checked in the plan). Take body blocks (skip `header`, `footer`, `page_number`, text under
-  12 chars). Normalize both sides with `normalize_for_match` (§7). For each block, search forward
-  from the previous match for its first 25 normalized characters. Page range = first and last
-  matched line of its blocks. Pages with no matched block are `interpolated` between neighbours.
-  `match_rate` = matched / body blocks; `confidence: low` below 0.8.
+- **MinerU**: one `-f zip` run per page window (below); read `middle_json.json`. Verify
+  `schema == "docvortex.middle"` and `schema_version == "2.0"`; if either differs, skip the page map,
+  write `confidence: low`, log it, and still succeed (R10). Body blocks = everything except
+  `header`, `footer`, `page_number`, `page_footnote` (those go to `dropped.txt`), `table` and text
+  under 12 characters. Normalize both sides with `normalize` + `fold_case` (§7). For each block, search
+  forward from the previous match for its first 25 normalized characters. Page range = first and last
+  matched line of its blocks; a `table` block takes the line range between its neighbours. A page
+  with no matched block is `interpolated`. `match_rate` = matched / body blocks, `confidence: low`
+  below 0.8 (to be re-tuned with a second two-column fixture, §14).
 - **pdftotext**: write the markdown page by page from the `\x0c`-split text, so ranges are exact.
 - **Custom command**: only if it supplies `pages.json`.
 - The map is for human tracing ("L14-22 ≈ PDF p.2") and lint output. It never changes a
@@ -137,8 +148,11 @@ page break and pollute verbatim matching.
 ## 5. Ingest integration
 
 - New `llm-wiki/scripts/convert_source.py`: importable `convert(pdf, wiki_root) -> Result` and a CLI
-  `convert_source.py <wiki-root> <pdf> [--force]`. MinerU runs in a subprocess with a timeout;
-  images are extracted from base64 to `images/`.
+  `convert_source.py <wiki-root> <pdf> [--force]`. MinerU runs in a subprocess with a timeout, as
+  `-f zip`, over **page windows of 8** (`-p 1-8`, `9-16`, …); the per-window markdown is concatenated
+  and block `page_idx` values are already absolute. If a window is killed (rc -9 / 137, most likely
+  out of memory), it is retried once as two half windows, down to a single page; a single page that
+  still dies fails the file with exit 3 and "killed, probably out of memory".
 - `batch_ingest.py`: for each `.pdf`, convert first (skip if `raw/converted/<slug>/` exists and the
   PDF sha matches `convert.json`), then ingest the markdown. `--pdf` stays as a deprecated no-op;
   `--no-convert` is added. The `stem in f.stem` output matching is removed (the result object
@@ -159,7 +173,7 @@ page break and pollute verbatim matching.
 | Check | Change |
 |---|---|
 | 5 sha256 | Also compare `source_pdf_sha256` with the PDF on disk. Mismatch → WARNING "converted copy is stale; re-run convert_source.py --force". |
-| 13 claims | Compare after `normalize_for_match` on both sides (fixes false ERRORs from `\*`, `\~`, line wraps). |
+| 13 claims | Compare after `normalize` (case-preserving, §7) on both sides: fixes false ERRORs from `\*`, `\~` and line wraps without loosening the case-sensitive check. |
 | new, info | `source_lossy: true` → "cited raw is a lossy conversion (pdftotext)". |
 | new, info | `pages.json` `confidence: low` → "page translation unreliable for <slug>". |
 
@@ -167,11 +181,22 @@ Existing 31 tests must stay green; check 13 must still fail on a genuinely absen
 
 ## 7. Shared helper
 
-`llm-wiki/scripts/textnorm.py::normalize_for_match(s)`: Unicode NFKC, remove Markdown backslash
-escapes (`\*`, `\~`, `\_`, …), curly quotes → straight, en/em dash → hyphen, strip zero-width
-characters, join `-\n` hyphenation, collapse whitespace, lowercase. Used by the page-map aligner
-and check 13 now; Spec B extends it and owns the decision on case sensitivity for quote
-verification.
+`llm-wiki/scripts/textnorm.py` (no third-party imports at module level):
+
+- `normalize(s)`: Unicode NFKC, remove Markdown backslash escapes (`\*`, `\~`, `\_`, …), curly
+  quotes and apostrophes → straight, en/em dash → hyphen, strip zero-width characters, collapse
+  whitespace. **Case-preserving.** Joins `-\n` hyphenation and also offers the hyphen-kept variant
+  (`well-\nknown` → `well-known`): `variants(s)` returns both when the text contains `-\n`.
+- `fold_case(s)`: `casefold` applied on top of `normalize`. Used by the page-map aligner and by
+  Spec B only; never by lint check 13.
+- `loose(s)`: `fold_case`, then drop Markdown markers (`* _ ~ \``), whitespace and punctuation,
+  keeping letters, digits and CJK characters. Needed because ASR transcripts put spaces between
+  CJK words.
+- `normalize_with_map(text) -> (normalized, offsets)`: `offsets[i]` is the index in `text` of
+  character `i` of the normalized string, so a match can be mapped back to raw line numbers.
+- Optional `to_simplified(s)`: Traditional → Simplified through `zhconv` when it is importable,
+  otherwise the identity. Off the critical path (it rescued only a handful of misses in the real-vault
+  prototype).
 
 ## 8. Safety
 
@@ -191,7 +216,7 @@ verification.
 | Case | Behaviour |
 |---|---|
 | Converter missing | auto: next in chain; explicit: exit 2 with install hint |
-| Timeout / crash | exit 3, outputs removed, batch continues with next file |
+| Timeout / crash / killed (rc -9, 137) after window halving | exit 3, outputs removed, batch continues with next file |
 | pdftotext result under 20 non-space characters | exit 4: "scanned PDF — needs MinerU or your own converter" |
 | Private-zone path | exit 5 |
 | Output slug dir exists, PDF sha differs, no `--force` | exit 6, nothing overwritten |
@@ -200,9 +225,17 @@ verification.
 
 - Fake converter (shell script) for the command contract and fallback order.
 - A small PDF built with `pdflatex` for the pdftotext path and exact `pages.json`.
-- A trimmed `middle_json` + markdown fixture from the measured run for the aligner, including a
-  repeated-text case that breaks first-occurrence matching and a page-number block that must not
-  match.
+- Trimmed `middle_json` + markdown fixtures (excerpts only; no third-party PDF is committed) from both
+  measured runs: single-column pp.1-3 and two-column BERT pp.1-6 with a table and footnotes. Cases:
+  repeated text that breaks first-occurrence matching, a page-number block that must not match,
+  a `page_footnote` block going to `dropped.txt`, a `table` block placed between neighbours,
+  absolute `page_idx` across windows.
+- Window retry: a fake converter that exits -9 on windows larger than 2 pages; the result must equal
+  the full-window result and a 1-page failure must exit 3.
+- Schema guard: `middle_json` with another `schema_version` → no page map, `confidence: low`, success.
+- `textnorm`: `normalize` keeps case; `fold_case`, `loose`, hyphen variants, `normalize_with_map`
+  offsets; check 13 still rejects `US` against `tell us now` and `ACT` against `act`.
+- Slug: CJK filenames, collisions, characters that would break a citation (`) , ( ;`).
 - Real MinerU test marked `slow`, skipped when `mineru-kit` is absent.
 - Check 5, check 13 (escape tolerance and still-fails-when-absent), dedupe by `source_pdf_sha256`.
 - Private-zone refusal. No network access asserted by checking no remote flags in the argv.
@@ -234,10 +267,20 @@ that are absent from the markdown by design; re-measured at 17/18, with a forwar
 page-comment injection, dropping `command`, removing the pdftotext fallback (user requirements;
 the fallback is loud and flagged lossy).
 
+Second round, after the user supplied a real vault and a cloud reviewer
+(Sage, 20 findings, no code read) and agy adjudicated: accepted the case-preserving `normalize` for
+check 13 (R02), schema guard (R10), `zip` single pass (R04, tested), footnotes into `dropped.txt`,
+window halving on kill, explicit slug from the PDF filename (agy NEW-5), `normalize_with_map`
+(agy NEW-3). Added from measurement, not from review: absolute `page_idx`, table HTML vs pipe table.
+Deferred: reconversion dry-run listing shifted citations (R14).
+
 ## 14. Open items to settle in the plan
 
-1. Whether `zip` output contains both markdown and middle JSON (saves the second parse pass).
-2. Aligner behaviour on two-column and table pages; needs a second fixture before trusting
-   `confidence: high`.
-3. Title extraction: MinerU sometimes drops the document title, and `fast_ingest.py` derives the
-   slug from the title; fall back to the PDF filename.
+1. ~~`zip` output contents~~ resolved (§2).
+2. Page-map `confidence` threshold (0.8) rests on one two-column paper and one single-column paper;
+   add a third fixture with several tables before treating `high` as reliable. The real-vault corpus has
+   no PDFs, so fixtures come from public arXiv papers (excerpts only).
+3. ~~Title extraction~~ resolved: `<slug>` comes from the PDF filename (§4).
+4. Window size 8 is a guess; tune from the first real conversion of a long paper (time vs retries).
+5. Whether to run formula recognition at all for `basic`: the 4-page kill happened while formulas
+   were being recognised; check whether `mineru-kit` has a switch before adding one.
