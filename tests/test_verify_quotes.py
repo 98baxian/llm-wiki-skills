@@ -844,3 +844,40 @@ class TestDroppedAndPdfPages:
         assert vq.lines_to_pages(pages, [9, 12]) == "1-2"
         assert vq.lines_to_pages(pages, []) is None
         assert vq.lines_to_pages(None, [1, 2]) is None
+
+
+"""Optional script-folding rung: Traditional raw text, Simplified quote."""
+
+
+class TestScriptFold:
+    TABLE = str.maketrans({"歡": "欢", "視": "视", "環": "环", "財": "财", "經": "经", "資": "资", "務": "务"})
+
+    def fake_simplified(self, monkeypatch):
+        monkeypatch.setattr(vq.textnorm, "to_simplified", lambda s: s.translate(self.TABLE))
+
+    def test_without_zhconv_the_traditional_text_does_not_match(self, monkeypatch):
+        monkeypatch.setattr(vq.textnorm, "to_simplified", lambda s: s)
+        d = doc("開頭", "歡迎收看本台環球財經 今天", "結尾")
+        c = claim("欢迎收看本台环球财经", locs=(("L", 2, 2),), fragments=["欢迎收看本台环球财经"])
+        assert vq.verify_claim(c, vq.Context(doc=d)).verdict != "exact"
+
+    def test_with_the_fold_it_matches_and_reports_lines(self, monkeypatch):
+        self.fake_simplified(monkeypatch)
+        d = doc("開頭", "歡迎收看本台環球財經 今天", "結尾")
+        c = claim("欢迎收看本台环球财经", locs=(("L", 2, 2),), fragments=["欢迎收看本台环球财经"])
+        r = vq.verify_claim(c, vq.Context(doc=d))
+        assert (r.verdict, r.note, r.matched_lines) == ("exact", "script-folded", [2, 2])
+
+    def test_a_fold_hit_outside_the_cited_lines_is_wrong_location(self, monkeypatch):
+        self.fake_simplified(monkeypatch)
+        d = doc(*(["開頭"] * 30 + ["歡迎收看本台環球財經 今天"]))
+        c = claim("欢迎收看本台环球财经", locs=(("L", 1, 1),), fragments=["欢迎收看本台环球财经"])
+        assert vq.verify_claim(c, vq.Context(doc=d)).verdict == "wrong_location"
+
+    def test_simplified_doc_is_cached_and_identity_returns_self(self, monkeypatch):
+        d = doc("abc")
+        monkeypatch.setattr(vq.textnorm, "to_simplified", lambda s: s)
+        assert d.simplified() is d
+        self.fake_simplified(monkeypatch)
+        d2 = doc("歡迎")
+        assert d2.simplified() is d2.simplified() and d2.simplified().text == "欢迎\n"

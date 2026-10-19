@@ -291,6 +291,13 @@ class Doc:
             self._trigrams = index
         return self._trigrams
 
+    def simplified(self) -> "Doc":
+        """This text with Traditional characters folded to Simplified (``self`` when nothing changes)."""
+        if not hasattr(self, "_simplified"):
+            folded = textnorm.to_simplified(self.text)
+            self._simplified = self if folded == self.text else Doc(folded)
+        return self._simplified
+
     @property
     def cjk_share(self) -> float:
         if self._cjk_share is None:
@@ -531,6 +538,17 @@ def verify_claim(claim: Claim, ctx: Context) -> Result:
                     return Result("fuzzy", "warning", 95, where, "case differs")
                 return Result("exact", "none", 100, where, "case differs")
             return Result("exact", "none", 100, where, "loose")
+        folded = doc.simplified()
+        if folded is not doc:
+            lines = None
+            for rung in RUNGS:
+                lines = match_fragments(folded, [textnorm.to_simplified(f) for f in frags], rung, ranges)
+                if lines:
+                    break
+            if lines:
+                if not in_cited_place:
+                    return Result("wrong_location", "warning", 100, list(lines), "found outside the cited lines (script-folded)")
+                return Result("exact", "none", 100, list(lines), "script-folded")
     if ctx.dropped is not None:
         margin = [(1, max(ctx.dropped.n_lines, 1))]
         if any(match_fragments(ctx.dropped, frags, rung, margin) for rung in RUNGS):
