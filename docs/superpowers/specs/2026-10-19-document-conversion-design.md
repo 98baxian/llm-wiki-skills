@@ -133,9 +133,10 @@ Citation format is unchanged: `(raw/converted/<slug>/<slug>.md, L14-22)`.
   write `confidence: low`, log it, and still succeed (R10). Body blocks = everything except
   `header`, `footer`, `page_number`, `page_footnote` (those go to `dropped.txt`), `table` and text
   under 12 characters. Normalize both sides with `normalize` + `fold_case` (§7). For each block, search
-  forward from the previous match for its first 25 normalized characters. Page range = first and last
-  matched line of its blocks; a `table` block takes the line range between its neighbours. A page
-  with no matched block is `interpolated`. `match_rate` = matched / body blocks, `confidence: low`
+  forward from the previous match for its first 25 normalized characters. Each page starts at its
+  first matched line and runs up to the line before the next page starts, so the ranges partition the
+  markdown (the first page starts at line 1, the last ends at the final line); a `table` block takes
+  the lines between its neighbours. A page with no matched block is `interpolated`. `match_rate` = matched / body blocks, `confidence: low`
   below 0.8 (to be re-tuned with a second two-column fixture, §14).
 - **pdftotext**: write the markdown page by page from the `\x0c`-split text, so ranges are exact.
 - **Custom command**: only if it supplies `pages.json`.
@@ -253,7 +254,12 @@ Existing 31 tests must stay green; check 13 must still fail on a genuinely absen
 ## 12. Files touched
 
 New: `llm-wiki/scripts/convert_source.py`, `llm-wiki/scripts/textnorm.py`,
-`tests/test_convert_source.py`, `tests/test_textnorm.py`, `tests/fixtures/convert/…`.
+`llm-wiki/scripts/vault_config.py` (CLAUDE.md section, key/value and private-zone readers),
+`tests/pdf_helpers.py`, `tests/test_convert_source.py`, `tests/test_textnorm.py`, `tests/test_vault_config.py`,
+`tests/test_fast_ingest_pdf.py`, `tests/test_batch_ingest.py`, `tests/test_lint_claims.py`,
+`tests/test_lint_conversion.py`, `tests/test_scaffold_conversion.py`, `tests/test_convert_real.py` (slow).
+Lint check 5 is extended by a sibling `check_conversion_state`, not by editing `check_sha256`.
+`pytest.ini` gains a `slow` marker (excluded by default).
 Modified: `batch_ingest.py`, `fast_ingest.py`, `lint_wiki.py`, `scaffold.py` (CLAUDE.md section),
 `SKILL.md`, `references/ops/op-ingest.md`, `references/tooling-tips.md`, `tests/README.md`.
 

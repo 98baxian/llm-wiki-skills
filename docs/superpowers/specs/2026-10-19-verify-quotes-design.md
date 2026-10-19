@@ -112,7 +112,7 @@ Secondary target: `<slug>.dropped.txt` next to a converted file (page margins), 
 verdict `not_found` becomes `unverifiable`, note "cross-language quote; cite verbatim or paraphrase",
 when the scripts cannot overlap. With `cjk_share` = CJK letters / all letters: the quote has at least 6
 CJK letters and the raw file's share is below 0.05, **or** the quote has no CJK letter, at least 3
-words, and the raw file's share is above 0.6. Mixed quotes (any share in between) are just
+words, and the raw file's share is above 0.6. A quote with fewer than 6 CJK letters, or any quote against a raw file whose share lies between the two limits, is just
 `not_found`. The report counts these separately (`unverifiable_cross_language`) so they stay visible.
 
 ## 6. Matching and verdicts
