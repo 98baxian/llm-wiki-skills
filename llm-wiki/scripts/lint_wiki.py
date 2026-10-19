@@ -41,6 +41,8 @@ import argparse
 from pathlib import Path
 from collections import defaultdict
 
+import textnorm
+
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -509,7 +511,7 @@ def check_claims_verification(wiki_dir: Path, root: Path) -> None:
                           f"{f.relative_to(root)} — raw file not found: {raw_rel}")
                 continue
             raw_text = raw_path.read_text(encoding="utf-8", errors="replace")
-            if verbatim not in raw_text:
+            if not textnorm.contains(raw_text, verbatim):
                 log_issue("ERROR", "claims-verification",
                           f"{f.relative_to(root)} — verbatim claim NOT FOUND in {raw_rel}: "
                           f"\"{verbatim}\"")
