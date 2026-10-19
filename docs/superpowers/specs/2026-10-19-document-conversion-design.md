@@ -245,7 +245,7 @@ Existing 31 tests must stay green; check 13 must still fail on a genuinely absen
 
 - Raw file for a PDF source = `raw/converted/<slug>/<slug>.md` (line-citable, images externalised).
 - `convert.json.lossy` and `pages.json.confidence` are available so Spec B can downgrade verdicts.
-- `normalize_for_match` is the single normalizer.
+- `textnorm.py` (`normalize`, `fold_case`, `loose`, `normalize_with_map`) is the single normalizer; `citations.py` (Spec B) is the single citation grammar.
 - `dropped.txt` as a secondary search target, so margin text (DOI, preprint id) is not a false
   `not_found`.
 - Known limit Spec B must state: reconversion changes line numbers.

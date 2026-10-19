@@ -233,7 +233,7 @@ additionally finds the second source in `(raw/a.md, L9; raw/b.md, L13)`, which t
 imports `verify_wiki` (no shell-out), which returns a `Report` and touches no globals; `lint`
 loops over the results and calls its own `log_issue`, so the module-level `errors/warnings/
 suggestions` and the exit code stay lint's business. Mapping: `not_found` error → `ERROR (quote-verification)`;
-`fuzzy`, `wrong_location`, downgraded `not_found` → `WARNING`; `unverifiable` → `SUGGESTION`.
+`near_miss`, `fuzzy`, `wrong_location`, downgraded `not_found` → `WARNING`; `unverifiable` → `SUGGESTION`.
 A WARNING is added when `unverifiable_infrastructure` (missing raw, `.pdf` cites, unreadable) is more
 than 10% of the cited quotes; cross-language quotes are not counted there, so a bilingual vault does
 not trip it. `--stale-only` is a different mode and is unaffected. It is **off by default** until the false-error
