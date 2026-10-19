@@ -429,3 +429,154 @@ def convert_mineru(pdf, tier: str = "basic", timeout: int = DEFAULT_TIMEOUT, *, 
         out.confidence = "low"
         print("warning: unexpected MinerU middle_json schema; page map skipped", file=sys.stderr)
     return out
+
+
+@dataclass
+class Result:
+    slug: str
+    directory: Path
+    md_path: Path
+    converter: str
+    lossy: bool
+    skipped: bool = False
+    page_map: str = "none"
+    source_pdf_sha256: str = ""
+
+
+def candidate_converters(cfg: Config) -> list[str]:
+    """Converters to use, best first. Explicit settings name exactly one."""
+    if cfg.converter == "none":
+        raise ConvertError("conversion is disabled (converter: none)", EXIT_USAGE)
+    if cfg.converter != "auto":
+        return [cfg.converter]
+    names = []
+    if cfg.command:
+        names.append("command")
+    if find_mineru_kit():
+        names.append("mineru")
+    if shutil.which("pdftotext"):
+        names.append("pdftotext")
+    if not names:
+        raise ConvertError(
+            "no converter available: install MinerU (mineru-kit), poppler-utils (pdftotext), "
+            "or set `command:` under ## Document conversion in CLAUDE.md", EXIT_USAGE)
+    return names
+
+
+def run_converter(name: str, pdf, slug: str, cfg: Config, runner, total_pages, window) -> Output:
+    if name == "command":
+        return convert_command(cfg.command, pdf, slug, cfg.timeout)
+    if name == "mineru":
+        return convert_mineru(pdf, cfg.tier, cfg.timeout, runner=runner, total_pages=total_pages, window=window)
+    if name == "pdftotext":
+        out = convert_pdftotext(pdf, cfg.timeout)
+        print("warning: pdftotext fallback is lossy (no tables, columns or OCR)", file=sys.stderr)
+        return out
+    raise ConvertError(f"unknown converter {name!r}", EXIT_USAGE)
+
+
+def read_convert_json(directory: Path) -> dict | None:
+    for f in directory.glob("*.convert.json"):
+        try:
+            return json.loads(f.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+    return None
+
+
+def write_artifacts(directory: Path, slug: str, out: Output, source_rel: str, source_sha: str,
+                    tier: str | None = None) -> None:
+    directory.mkdir(parents=True)
+    md_path = directory / f"{slug}.md"
+    md_path.write_text(out.markdown, encoding="utf-8")
+    if out.pages is not None or out.confidence is not None:
+        pages = {"schema": "llm-wiki.pages/1", "match_rate": round(out.match_rate or 0.0, 4),
+                 "confidence": out.confidence or "low", "pages": out.pages or []}
+        (directory / f"{slug}.pages.json").write_text(json.dumps(pages, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+    if out.dropped_lines:
+        (directory / f"{slug}.dropped.txt").write_text("\n".join(out.dropped_lines) + "\n", encoding="utf-8")
+    base = directory.resolve()
+    for rel, data in out.images.items():
+        target = (directory / rel).resolve()
+        if base not in target.parents:
+            continue                      # never write outside the output directory
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+    meta = {
+        "schema": "llm-wiki.convert/1", "converter": out.converter, "version": out.version,
+        "tier": tier, "lossy": out.lossy, "source_pdf": source_rel, "source_pdf_sha256": source_sha,
+        "md_sha256": sha256_file(md_path), "converted_at": now_iso(),
+        "pages_total": out.pages_total, "page_map": out.page_map, "dropped": out.dropped_types,
+    }
+    (directory / f"{slug}.convert.json").write_text(json.dumps(meta, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+
+
+def convert(pdf, root, *, force: bool = False, config: Config | None = None, runner=None,
+            total_pages: int | None = None, window: int = WINDOW_PAGES) -> Result:
+    root = Path(root).resolve()
+    pdf = Path(pdf).resolve()
+    if not pdf.is_file():
+        raise ConvertError(f"PDF not found: {pdf}", EXIT_USAGE)
+    if vault_config.in_private_zone(root, pdf):
+        raise ConvertError(f"refusing to convert a file inside a private zone: {pdf}", EXIT_PRIVATE)
+    cfg = config or load_config(root)
+    sha = sha256_file(pdf)
+    try:
+        source_rel = pdf.relative_to(root).as_posix()
+    except ValueError:
+        source_rel = str(pdf)
+    base = root / "raw" / "converted"
+    slug = sanitize_slug(pdf.name)
+    directory = base / slug
+    existing = read_convert_json(directory)
+    if existing and existing.get("source_pdf") != source_rel and existing.get("source_pdf_sha256") != sha:
+        slug = f"{slug}-{sha[:8]}"                      # another PDF already owns this slug
+        directory = base / slug
+        existing = read_convert_json(directory)
+
+    def result(skipped: bool, meta: dict) -> Result:
+        return Result(slug, directory, directory / f"{slug}.md", meta.get("converter", ""),
+                      bool(meta.get("lossy")), skipped, meta.get("page_map", "none"), sha)
+
+    if existing and existing.get("source_pdf_sha256") == sha and not force:
+        return result(True, existing)
+    if directory.exists() and not force:
+        raise ConvertError(
+            f"{directory} already holds a conversion of an earlier version of this PDF; "
+            "re-run with --force (line numbers will change and existing citations will be flagged)", EXIT_EXISTS)
+
+    name = candidate_converters(cfg)[0]
+    out = run_converter(name, pdf, slug, cfg, runner, total_pages, window)
+    base.mkdir(parents=True, exist_ok=True)
+    staging = base / f".tmp-{slug}-{os.getpid()}"
+    shutil.rmtree(staging, ignore_errors=True)
+    try:
+        write_artifacts(staging, slug, out, source_rel, sha, cfg.tier if name == "mineru" else None)
+        if directory.exists():
+            shutil.rmtree(directory)
+        os.replace(staging, directory)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+    meta = json.loads((directory / f"{slug}.convert.json").read_text(encoding="utf-8"))
+    return result(False, meta)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Convert a PDF into line-citable markdown under raw/converted/.")
+    parser.add_argument("wiki_root", help="Path to the wiki root directory")
+    parser.add_argument("pdf", help="PDF to convert")
+    parser.add_argument("--force", action="store_true", help="Reconvert even if raw/converted/<slug>/ exists (line numbers change)")
+    args = parser.parse_args(argv)
+    try:
+        res = convert(args.pdf, args.wiki_root, force=args.force)
+    except ConvertError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return e.code
+    root = Path(args.wiki_root).resolve()
+    state = "already converted" if res.skipped else f"converted with {res.converter}"
+    print(f"{state}: {res.md_path.relative_to(root).as_posix()}" + (" (lossy)" if res.lossy else ""))
+    return EXIT_OK
+
+
+if __name__ == "__main__":
+    sys.exit(main())

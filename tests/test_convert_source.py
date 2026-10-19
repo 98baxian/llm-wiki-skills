@@ -475,3 +475,204 @@ class TestConvertMineru:
         with pytest.raises(convert_source.ConvertError) as exc:
             convert_source.convert_mineru(self._pdf(tmp_path), "basic", 60, total_pages=1)
         assert exc.value.code == convert_source.EXIT_USAGE
+
+
+"""convert(): resolution chain, idempotence, collisions, private zones, atomic output, CLI."""
+import json
+import shlex
+import shutil
+import sys
+
+import pytest
+
+from pdf_helpers import make_pdf
+
+import convert_source
+
+TOOL = '''
+import os, pathlib, sys
+pdf, outdir, slug = sys.argv[1:4]
+with open(os.environ["FAKE_CMD_LOG"], "a") as log:
+    log.write(pdf + "\\n")
+if os.environ.get("FAKE_CMD_FAIL"):
+    (pathlib.Path(outdir) / "partial.txt").write_text("x")
+    sys.exit(1)
+(pathlib.Path(outdir) / (slug + ".md")).write_text("Converted line one\\nConverted line two\\n", encoding="utf-8")
+'''
+
+
+@pytest.fixture
+def vault(tmp_path, monkeypatch):
+    root = tmp_path / "vault"
+    (root / "raw" / "pdfs").mkdir(parents=True)
+    tool = tmp_path / "tool.py"
+    tool.write_text(TOOL, encoding="utf-8")
+    log = tmp_path / "cmd.log"
+    monkeypatch.setenv("FAKE_CMD_LOG", str(log))
+    command = f"{shlex.quote(sys.executable)} {shlex.quote(str(tool))} {{input}} {{outdir}} {{slug}}"
+    (root / "CLAUDE.md").write_text(
+        "# Wiki\n\n## Document conversion\n\nconverter: command\n"
+        f"command: {command}\n\n## Private zones\n\n- `sensitive_data/`\n",
+        encoding="utf-8",
+    )
+    (root / "sensitive_data").mkdir()
+    return root
+
+
+def add_pdf(root, name="Paper One.pdf", payload=b"%PDF-1"):
+    path = root / "raw" / "pdfs" / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(payload)
+    return path
+
+
+def runs(root):
+    log = root.parent / "cmd.log"
+    return len(log.read_text().splitlines()) if log.exists() else 0
+
+
+def test_creates_script_owned_artifacts(vault):
+    res = convert_source.convert(add_pdf(vault), vault)
+    assert res.slug == "paper-one" and not res.skipped
+    assert res.md_path == vault / "raw" / "converted" / "paper-one" / "paper-one.md"
+    meta = json.loads((res.directory / "paper-one.convert.json").read_text())
+    assert meta["schema"] == "llm-wiki.convert/1" and meta["converter"] == "command"
+    assert meta["source_pdf"] == "raw/pdfs/Paper One.pdf"
+    assert meta["source_pdf_sha256"] == convert_source.sha256_file(vault / "raw" / "pdfs" / "Paper One.pdf")
+    assert meta["md_sha256"] == convert_source.sha256_file(res.md_path)
+    assert meta["lossy"] is False and meta["page_map"] == "none"
+
+
+def test_second_call_is_skipped_without_running_the_tool(vault):
+    pdf = add_pdf(vault)
+    convert_source.convert(pdf, vault)
+    again = convert_source.convert(pdf, vault)
+    assert again.skipped and runs(vault) == 1
+
+
+def test_changed_pdf_needs_force(vault):
+    pdf = add_pdf(vault)
+    first = convert_source.convert(pdf, vault)
+    before = first.md_path.read_bytes()
+    pdf.write_bytes(b"%PDF-2 changed")
+    with pytest.raises(convert_source.ConvertError) as exc:
+        convert_source.convert(pdf, vault)
+    assert exc.value.code == convert_source.EXIT_EXISTS and first.md_path.read_bytes() == before
+    forced = convert_source.convert(pdf, vault, force=True)
+    meta = json.loads((forced.directory / "paper-one.convert.json").read_text())
+    assert not forced.skipped and meta["source_pdf_sha256"] == convert_source.sha256_file(pdf)
+    assert runs(vault) == 2
+
+
+def test_two_pdfs_with_the_same_name_do_not_collide(vault):
+    a = add_pdf(vault, "a/paper.pdf", b"%PDF-A")
+    b = add_pdf(vault, "b/paper.pdf", b"%PDF-B")
+    ra = convert_source.convert(a, vault)
+    rb = convert_source.convert(b, vault)
+    assert ra.slug == "paper" and rb.slug.startswith("paper-") and rb.slug != ra.slug
+    assert rb.md_path.exists() and ra.md_path.exists()
+
+
+def test_private_zone_input_is_refused_and_nothing_is_written(vault):
+    secret = vault / "sensitive_data" / "report.pdf"
+    secret.write_bytes(b"%PDF")
+    with pytest.raises(convert_source.ConvertError) as exc:
+        convert_source.convert(secret, vault)
+    assert exc.value.code == convert_source.EXIT_PRIVATE
+    assert not (vault / "raw" / "converted").exists() and runs(vault) == 0
+
+
+def test_failed_conversion_leaves_no_partial_output(vault, monkeypatch):
+    monkeypatch.setenv("FAKE_CMD_FAIL", "1")
+    with pytest.raises(convert_source.ConvertError) as exc:
+        convert_source.convert(add_pdf(vault), vault)
+    assert exc.value.code == convert_source.EXIT_FAILED
+    base = vault / "raw" / "converted"
+    assert not base.exists() or list(base.iterdir()) == []
+
+
+def test_converter_none_is_refused(vault):
+    cfg = convert_source.Config(converter="none")
+    with pytest.raises(convert_source.ConvertError) as exc:
+        convert_source.convert(add_pdf(vault), vault, config=cfg)
+    assert exc.value.code == convert_source.EXIT_USAGE
+
+
+class TestAutoChain:
+    def test_command_wins_over_other_converters(self, vault, monkeypatch):
+        monkeypatch.setattr(convert_source, "find_mineru_kit", lambda: "/x/mineru-kit")
+        cfg = convert_source.load_config(vault)
+        cfg.converter = "auto"
+        assert convert_source.candidate_converters(cfg)[0] == "command"
+
+    def test_order_without_command(self, monkeypatch):
+        monkeypatch.setattr(convert_source, "find_mineru_kit", lambda: "/x/mineru-kit")
+        monkeypatch.setattr(convert_source.shutil, "which", lambda name: "/usr/bin/pdftotext")
+        assert convert_source.candidate_converters(convert_source.Config()) == ["mineru", "pdftotext"]
+
+    def test_nothing_available_exit_2_with_hint(self, monkeypatch):
+        monkeypatch.setattr(convert_source, "find_mineru_kit", lambda: None)
+        monkeypatch.setattr(convert_source.shutil, "which", lambda name: None)
+        with pytest.raises(convert_source.ConvertError) as exc:
+            convert_source.candidate_converters(convert_source.Config())
+        assert exc.value.code == convert_source.EXIT_USAGE and "mineru-kit" in str(exc.value)
+
+
+def test_mineru_path_writes_pages_dropped_and_images(vault):
+    def runner(first, last):
+        pages = [{"page_idx": n - 1, "blocks": [
+            {"type": "header", "content": "running header"},
+            {"type": "text", "content": f"Page {n} paragraph with enough words to align."},
+        ]} for n in range(first, last + 1)]
+        md = "\n\n".join(f"Page {n} paragraph with enough words to align." for n in range(first, last + 1))
+        middle = {"schema": "docvortex.middle", "schema_version": "2.0",
+                  "metadata": {"producer": {"version": "4.0.12"}}, "pages": pages}
+        return convert_source.WindowResult(md + "\n", middle, {f"images/p{first}.jpg": b"JPG"})
+
+    cfg = convert_source.Config(converter="mineru")
+    res = convert_source.convert(add_pdf(vault), vault, config=cfg, runner=runner, total_pages=3)
+    d = res.directory
+    pages = json.loads((d / "paper-one.pages.json").read_text())
+    assert pages["schema"] == "llm-wiki.pages/1" and pages["confidence"] == "high"
+    assert [p["page"] for p in pages["pages"]] == [1, 2, 3]
+    assert "p1\theader\trunning header" in (d / "paper-one.dropped.txt").read_text()
+    assert (d / "images" / "p1.jpg").read_bytes() == b"JPG"
+    meta = json.loads((d / "paper-one.convert.json").read_text())
+    assert meta["converter"] == "mineru-kit" and meta["version"] == "4.0.12" and meta["page_map"] == "aligned"
+    assert meta["pages_total"] == 3 and meta["dropped"] == ["header", "footer", "page_number", "page_footnote"]
+
+
+def test_image_names_cannot_escape_the_output_directory(vault):
+    def runner(first, last):
+        middle = {"schema": "docvortex.middle", "schema_version": "2.0", "pages": []}
+        return convert_source.WindowResult("text\n", middle, {"images/../../evil.txt": b"x"})
+
+    cfg = convert_source.Config(converter="mineru")
+    res = convert_source.convert(add_pdf(vault), vault, config=cfg, runner=runner, total_pages=1)
+    assert not (vault / "raw" / "evil.txt").exists() and not (res.directory.parent / "evil.txt").exists()
+
+
+@pytest.mark.skipif(shutil.which("pdftotext") is None, reason="pdftotext not installed")
+def test_pdftotext_end_to_end_marks_lossy(vault):
+    pdf = add_pdf(vault, "scan.pdf", make_pdf(["Alpha line one\nAlpha line two", "Beta page text here"]))
+    cfg = convert_source.Config(converter="pdftotext")
+    res = convert_source.convert(pdf, vault, config=cfg)
+    meta = json.loads((res.directory / "scan.convert.json").read_text())
+    assert meta["lossy"] is True and meta["converter"] == "pdftotext" and meta["page_map"] == "exact"
+    assert res.lossy is True
+
+
+class TestCli:
+    def test_ok_prints_path_and_returns_0(self, vault, capsys):
+        pdf = add_pdf(vault)
+        assert convert_source.main([str(vault), str(pdf)]) == 0
+        assert "raw/converted/paper-one/paper-one.md" in capsys.readouterr().out
+
+    def test_error_code_is_returned(self, vault, capsys):
+        secret = vault / "sensitive_data" / "r.pdf"
+        secret.write_bytes(b"%PDF")
+        assert convert_source.main([str(vault), str(secret)]) == convert_source.EXIT_PRIVATE
+        assert "private zone" in capsys.readouterr().err
+
+    def test_missing_pdf_is_usage_error(self, vault):
+        assert convert_source.main([str(vault), str(vault / "nope.pdf")]) == convert_source.EXIT_USAGE
