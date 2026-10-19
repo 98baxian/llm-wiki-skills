@@ -603,6 +603,34 @@ def check_duplicate_list_entries(wiki_dir: Path, root: Path) -> None:
                     seen.add(target)
 
 
+# ── Check 16: Quote Verification (opt-in: --verify-quotes) ───────────────────
+
+UNVERIFIABLE_SHARE_WARNING = 0.10
+
+
+def check_quote_verification(root: Path) -> None:
+    """Quoted passages must occur in the raw file they cite (see verify_quotes.py).
+    ERROR = not found; WARNING = fuzzy / wrong place / near miss / downgraded; INFO = unverifiable."""
+    import verify_quotes
+
+    report = verify_quotes.verify_wiki(root)
+    level = {"error": "ERROR", "warning": "WARNING", "suggestion": "INFO"}
+    for r in report["results"]:
+        if r["severity"] in level:
+            note = f" — {r['note']}" if r["note"] else ""
+            log_issue(level[r["severity"]], "quote-verification",
+                      f"{r['page']}:{r['line']} {r['verdict']} in {r['raw']} ({r['loc']}): "
+                      f"\"{r['quote'][:60]}\"{note}")
+    c = report["counts"]
+    cited = sum(c[k] for k in ("exact", "fuzzy", "wrong_location", "near_miss", "not_found_error",
+                               "not_found_warning", "unverifiable_infrastructure", "unverifiable_cross_language"))
+    if cited and c["unverifiable_infrastructure"] / cited > UNVERIFIABLE_SHARE_WARNING:
+        log_issue("WARNING", "quote-verification",
+                  f"{c['unverifiable_infrastructure']} of {cited} cited quotes "
+                  f"({100 * c['unverifiable_infrastructure'] // cited}%) could not be checked "
+                  "(missing, PDF or unreadable raw files)")
+
+
 # ── Stale-Only Mode ───────────────────────────────────────────────────────────
 
 def stale_only(root: str) -> int:
@@ -650,7 +678,7 @@ def stale_only(root: str) -> int:
 
 # ── Report ────────────────────────────────────────────────────────────────────
 
-def lint(root: str, structural: bool = False) -> int:
+def lint(root: str, structural: bool = False, verify_quotes: bool = False) -> int:
     root_path = Path(root)
     wiki_path = root_path / "wiki"
     outputs_path = root_path / "outputs"
@@ -680,6 +708,8 @@ def lint(root: str, structural: bool = False) -> int:
     check_claims_verification(wiki_path, root_path)
     check_wikilink_citations(wiki_path, root_path)
     check_duplicate_list_entries(wiki_path, root_path)
+    if verify_quotes:
+        check_quote_verification(root_path)
 
     checks_run = "10 (structural)" if structural else "15+ (full)"
     report_path = outputs_path / f"lint-{TODAY_ISO}.md"
@@ -739,13 +769,15 @@ def main() -> None:
                         help="Skip uncited-claims check (faster)")
     parser.add_argument("--stale-only", action="store_true",
                         help="Only report stale pages (fast; used by session-start)")
+    parser.add_argument("--verify-quotes", action="store_true",
+                        help="Also check that quoted passages occur in the raw files they cite")
 
     args = parser.parse_args()
 
     if args.stale_only:
         sys.exit(stale_only(args.wiki_root))
     else:
-        sys.exit(lint(args.wiki_root, structural=args.structural))
+        sys.exit(lint(args.wiki_root, structural=args.structural, verify_quotes=args.verify_quotes))
 
 
 if __name__ == "__main__":
