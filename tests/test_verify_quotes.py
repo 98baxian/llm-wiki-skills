@@ -792,3 +792,55 @@ class TestFlag:
         vq.main([str(root), "--flag", "--no-cache"])
         entries = audit_review.scan_fix_comments(root)
         assert len(entries) == 1 and "quote not found" in str(entries[0])
+
+
+"""Margin text (dropped.txt) as a last search target, and PDF page numbers in the report."""
+import json
+
+
+class TestDroppedAndPdfPages:
+    def vault(self, tmp_path, page, md="body text only\nsecond line\n", pages=None, dropped=None):
+        raw = {"raw/converted/doc/doc.md": md}
+        if pages is not None:
+            raw["raw/converted/doc/doc.pages.json"] = json.dumps(pages)
+        if dropped is not None:
+            raw["raw/converted/doc/doc.dropped.txt"] = dropped
+        return make_vault(tmp_path, {"concepts/x.md": page}, raw)
+
+    def test_margin_text_is_found_in_dropped_txt(self, tmp_path):
+        page = 'DOI: "doi: https://doi.org/10.1101/2025.03.10.642480" (raw/converted/doc/doc.md, L1)\n'
+        dropped = "p1\theader\tbioRxiv preprint doi: https://doi.org/10.1101/2025.03.10.642480; this version posted\n"
+        root = self.vault(tmp_path, page, dropped=dropped)
+        report = vq.verify_wiki(root, use_cache=False)
+        r = report["results"][0]
+        assert (r["verdict"], r["severity"], r["note"]) == ("exact", "none", "page margin")
+
+    def test_without_dropped_txt_the_same_quote_is_not_found(self, tmp_path):
+        page = 'DOI: "doi: https://doi.org/10.1101/2025.03.10.642480" (raw/converted/doc/doc.md, L1)\n'
+        report = vq.verify_wiki(self.vault(tmp_path, page), use_cache=False)
+        assert report["counts"]["not_found_error"] == 1
+
+    def test_changing_dropped_txt_invalidates_the_cache(self, tmp_path):
+        page = 'DOI: "doi: https://doi.org/10.1101/2025.03.10.642480" (raw/converted/doc/doc.md, L1)\n'
+        root = self.vault(tmp_path, page)
+        assert vq.verify_wiki(root)["errors"] == 1
+        (root / "raw" / "converted" / "doc" / "doc.dropped.txt").write_text("p1\theader\tdoi: https://doi.org/10.1101/2025.03.10.642480\n")
+        again = vq.verify_wiki(root)
+        assert again["errors"] == 0 and again["counts"]["from_cache"] == 0
+
+    def test_report_translates_lines_to_pdf_pages(self, tmp_path):
+        pages = {"confidence": "high", "pages": [
+            {"page": 1, "line_start": 1, "line_end": 1, "how": "aligned"},
+            {"page": 2, "line_start": 2, "line_end": 3, "how": "aligned"}]}
+        page = 'Q: "second line of the body" (raw/converted/doc/doc.md, L2)\n'
+        root = self.vault(tmp_path, page, md="first line\nsecond line of the body\n", pages=pages)
+        r = vq.verify_wiki(root, use_cache=False)["results"][0]
+        assert r["verdict"] == "exact" and r["pdf_page"] == "2"
+
+    def test_lines_to_pages_ranges_and_missing_map(self):
+        pages = {"pages": [{"page": 1, "line_start": 1, "line_end": 10}, {"page": 2, "line_start": 11, "line_end": 20},
+                           {"page": 3, "line_start": 21, "line_end": 30}]}
+        assert vq.lines_to_pages(pages, [5, 5]) == "1"
+        assert vq.lines_to_pages(pages, [9, 12]) == "1-2"
+        assert vq.lines_to_pages(pages, []) is None
+        assert vq.lines_to_pages(None, [1, 2]) is None

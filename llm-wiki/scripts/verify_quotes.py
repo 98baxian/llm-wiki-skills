@@ -408,6 +408,7 @@ class Context:
     threshold: int = THRESHOLD
     near_miss: int = NEAR_MISS
     strict: bool = False
+    dropped: Doc | None = None            # header/footer/footnote text the converted markdown omits
 
 
 def is_short(quote: str) -> bool:
@@ -530,6 +531,10 @@ def verify_claim(claim: Claim, ctx: Context) -> Result:
                     return Result("fuzzy", "warning", 95, where, "case differs")
                 return Result("exact", "none", 100, where, "case differs")
             return Result("exact", "none", 100, where, "loose")
+    if ctx.dropped is not None:
+        margin = [(1, max(ctx.dropped.n_lines, 1))]
+        if any(match_fragments(ctx.dropped, frags, rung, margin) for rung in RUNGS):
+            return Result("exact", "none", 100, [], "page margin")
     cited_score, cited_lines = _fuzzy_over(doc, frags, windows or whole)
     if cited_score >= ctx.threshold:
         return Result("fuzzy", "warning", cited_score, cited_lines, "wording differs slightly")
@@ -704,6 +709,15 @@ class RawStore:
         self._meta[rel] = (convert, pages, convert_sha, pages_sha)
         return self._meta[rel]
 
+    def dropped(self, rel: str) -> tuple[Doc | None, str]:
+        """The ``<slug>.dropped.txt`` next to a converted markdown file, and its sha256."""
+        path = self.root / rel
+        f = path.with_name(path.stem + ".dropped.txt")
+        if "converted" not in path.parts or not f.is_file():
+            return None, ""
+        data = f.read_bytes()
+        return Doc(data.decode("utf-8", errors="replace")), sha256_bytes(data)
+
     def others(self, exclude: str):
         """Other raw documents, for finding a quote cited to the wrong file (capped)."""
         files = size = 0
@@ -720,6 +734,18 @@ class RawStore:
             doc, _ = self.load(rel)
             if doc is not None:
                 yield rel, doc
+
+
+def lines_to_pages(pages_meta: dict | None, matched: list[int]) -> str | None:
+    """PDF pages (``"2"`` or ``"2-3"``) covering the matched markdown lines, from pages.json."""
+    if not pages_meta or not matched:
+        return None
+    first, last = matched[0], matched[-1]
+    hit = [p["page"] for p in pages_meta.get("pages", [])
+           if p["line_start"] <= last and p["line_end"] >= first]
+    if not hit:
+        return None
+    return str(min(hit)) if min(hit) == max(hit) else f"{min(hit)}-{max(hit)}"
 
 
 def wiki_pages(root: Path, pages: list[str] | None) -> list[Path]:
@@ -763,13 +789,14 @@ def verify_wiki(root, pages: list[str] | None = None, *, threshold: int = THRESH
         for claim in extracted.claims:
             doc, reason = store.load(claim.raw)
             convert, pages_meta, convert_sha, pages_sha = store.sidecars(claim.raw)
+            dropped_doc, dropped_sha = store.dropped(claim.raw)
             if reason == "raw file missing":
                 missing[claim.raw] += 1
             key = claim_key(claim)
             seen.add(key)
             fingerprint = {
                 "raw_sha256": sha256_bytes(doc.text.encode("utf-8")) if doc else reason,
-                "pages_sha256": pages_sha, "convert_sha256": convert_sha, "dropped_sha256": "",
+                "pages_sha256": pages_sha, "convert_sha256": convert_sha, "dropped_sha256": dropped_sha,
                 "threshold": threshold, "near_miss": near_miss, "strict": strict, "algo": algo,
             }
             cached = cache.get(key, fingerprint, corpus)
@@ -778,14 +805,15 @@ def verify_wiki(root, pages: list[str] | None = None, *, threshold: int = THRESH
                 counts["from_cache"] += 1
             else:
                 ctx = Context(doc, reason, convert, pages_meta,
-                              others=lambda rel=claim.raw: store.others(rel),
+                              others=lambda rel=claim.raw: store.others(rel), dropped=dropped_doc,
                               threshold=threshold, near_miss=near_miss, strict=strict)
                 result = verify_claim(claim, ctx)
                 cache.put(key, fingerprint, corpus, result)
             tally(counts, result)
             results.append({
                 "id": claim_id(claim), "page": page, "line": claim.line_no, "quote": claim.quote, "raw": claim.raw,
-                "loc": format_locs(claim.locs), "pdf_page": None, "verdict": result.verdict,
+                "loc": format_locs(claim.locs), "pdf_page": lines_to_pages(pages_meta, result.matched_lines),
+                "verdict": result.verdict,
                 "severity": result.severity, "score": result.score,
                 "matched_lines": result.matched_lines, "note": result.note,
                 "suggested_raw": result.suggested_raw,
