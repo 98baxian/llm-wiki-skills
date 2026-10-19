@@ -242,3 +242,194 @@ class TestFuzzy:
         assert len(d.text) > vq.SCAN_LIMIT * 4
         score, found, _ = vq.fuzzy_best(d, "the quick brown fox jumps over the lazy cat near the river bank", (1, 400))
         assert score >= vq.THRESHOLD and found == (251, 251)
+
+
+"""verify_claim: windows, the matching ladder, verdicts and severities."""
+import pytest
+
+import verify_quotes as vq
+
+
+def claim(quote, locs=(("L", 1, 1),), fragments=None, shared=0):
+    c = vq.Claim("wiki/x.md", 5, quote, fragments or vq.fragments_of(quote), "raw/a.md", locs, 5)
+    c.shared = shared
+    return c
+
+
+def ctx(*lines, **kw):
+    return vq.Context(doc=doc(*lines), **kw)
+
+
+class TestWindows:
+    def test_line_ranges_get_slack_and_clamp_at_one(self):
+        c = claim("x", locs=(("L", 3, 4), ("L", 30, 30)))
+        assert vq.windows_for(c, ctx("a")) == [(1, 4 + vq.SLACK), (30 - vq.SLACK, 30 + vq.SLACK)]
+
+    def test_unknown_or_page_without_map_means_whole_file(self):
+        assert vq.windows_for(claim("x", locs=(("unknown",),)), ctx("a")) is None
+        assert vq.windows_for(claim("x", locs=(("p", 2, 2),)), ctx("a")) is None
+        assert vq.windows_for(claim("x", locs=(("L", 1, 1), ("unknown",))), ctx("a")) is None
+
+    def test_page_with_map_uses_the_page_line_range(self):
+        pages = {"confidence": "high", "pages": [
+            {"page": 1, "line_start": 1, "line_end": 40}, {"page": 2, "line_start": 41, "line_end": 80}]}
+        c = claim("x", locs=(("p", 2, 2),))
+        assert vq.windows_for(c, ctx("a", pages=pages)) == [(41 - vq.SLACK, 80 + vq.SLACK)]
+        assert vq.windows_for(claim("x", locs=(("p", 9, 9),)), ctx("a", pages=pages)) is None
+
+
+class TestLadder:
+    D = ("intro", "The Cell divides rapidly in culture", "filler", "tail text")
+
+    def test_literal_match_in_the_cited_lines(self):
+        r = vq.verify_claim(claim("The Cell divides rapidly", locs=(("L", 2, 2),)), ctx(*self.D))
+        assert (r.verdict, r.severity, r.score, r.matched_lines, r.note) == ("exact", "none", 100, [2, 2], "")
+
+    def test_slack_covers_small_line_drift(self):
+        lines = ["x"] * 7 + ["the quoted passage is right here"]
+        r = vq.verify_claim(claim("the quoted passage is right here", locs=(("L", 1, 1),)), ctx(*lines))
+        assert r.verdict == "exact" and r.matched_lines == [8, 8]
+
+    def test_outside_the_window_is_wrong_location_with_lines(self):
+        lines = ["x"] * 30 + ["the quoted passage is right here"]
+        r = vq.verify_claim(claim("the quoted passage is right here", locs=(("L", 1, 1),)), ctx(*lines))
+        assert (r.verdict, r.severity, r.matched_lines) == ("wrong_location", "warning", [31, 31])
+
+    def test_long_quote_differing_only_in_case_is_exact(self):
+        r = vq.verify_claim(claim("the cell divides rapidly in culture", locs=(("L", 2, 2),)), ctx(*self.D))
+        assert (r.verdict, r.note) == ("exact", "case differs")
+
+    def test_short_quote_differing_only_in_case_is_fuzzy(self):
+        r = vq.verify_claim(claim("The Act applies", locs=(("L", 1, 1),)), ctx("the act applies here"))
+        assert (r.verdict, r.score, r.note, r.severity) == ("fuzzy", 95, "case differs", "warning")
+
+    def test_loose_rung_handles_asr_spacing_and_punctuation(self):
+        c = claim("明年继续扩建社区图书馆", fragments=["明年继续扩建社区图书馆"])
+        r = vq.verify_claim(c, ctx("开头", "他说 明年 继续 扩建 社区 图书馆 。", "结尾"))
+        assert (r.verdict, r.note, r.matched_lines) == ("exact", "loose", [2, 2])
+
+    def test_whole_file_is_the_cited_place_for_location_unknown(self):
+        r = vq.verify_claim(claim("The Cell divides rapidly", locs=(("unknown",),)), ctx(*self.D))
+        assert r.verdict == "exact"
+
+    def test_ellipsis_fragments_must_be_in_order(self):
+        d = ctx("alpha beta gamma delta epsilon")
+        ok = claim("alpha beta ... delta epsilon", fragments=["alpha beta", "delta epsilon"])
+        bad = claim("delta epsilon ... alpha beta", fragments=["delta epsilon", "alpha beta"])
+        assert vq.verify_claim(ok, d).verdict == "exact"
+        assert vq.verify_claim(bad, d).verdict == "not_found"
+
+    def test_several_locations_any_may_hold_the_quote(self):
+        lines = ["x"] * 60 + ["the quoted passage is right here"]
+        c = claim("the quoted passage is right here", locs=(("L", 1, 1), ("L", 61, 61)))
+        assert vq.verify_claim(c, ctx(*lines)).verdict == "exact"
+
+
+class TestFuzzyBranches:
+    """The thresholds are exercised with a stubbed scorer so the bands are exact."""
+
+    def stub(self, monkeypatch, cited, whole=None):
+        calls = []
+
+        def fake(doc, fragment, line_range):
+            calls.append(line_range)
+            return (cited, (2, 2), 10) if len(calls) == 1 or whole is None else (whole, (9, 9), 90)
+
+        monkeypatch.setattr(vq, "fuzzy_best", fake)
+
+    def run(self):
+        return vq.verify_claim(claim("zzz qqq www vvv", locs=(("L", 2, 2),)), ctx("a", "b", "c"))
+
+    def test_high_score_in_window_is_fuzzy(self, monkeypatch):
+        self.stub(monkeypatch, 90)
+        r = self.run()
+        assert (r.verdict, r.score, r.matched_lines, r.severity) == ("fuzzy", 90, [2, 2], "warning")
+
+    def test_high_score_only_elsewhere_is_wrong_location(self, monkeypatch):
+        self.stub(monkeypatch, 40, whole=88)
+        r = self.run()
+        assert (r.verdict, r.score, r.matched_lines) == ("wrong_location", 88, [9, 9])
+
+    def test_middle_band_is_near_miss_and_a_warning(self, monkeypatch):
+        self.stub(monkeypatch, 72, whole=65)
+        r = self.run()
+        assert (r.verdict, r.score, r.severity) == ("near_miss", 72, "warning")
+
+    def test_low_band_is_not_found_and_an_error(self, monkeypatch):
+        self.stub(monkeypatch, 40, whole=30)
+        r = self.run()
+        assert (r.verdict, r.severity) == ("not_found", "error")
+
+    def test_threshold_and_near_miss_are_configurable(self, monkeypatch):
+        self.stub(monkeypatch, 70)
+        r = vq.verify_claim(claim("zzz qqq www vvv", locs=(("L", 2, 2),)),
+                            ctx("a", "b", "c", threshold=65, near_miss=50))
+        assert r.verdict == "fuzzy"
+
+
+class TestNotFound:
+    def test_plain_not_found_is_an_error(self):
+        r = vq.verify_claim(claim("completely invented sentence about nothing"), ctx("alpha", "beta"))
+        assert (r.verdict, r.severity) == ("not_found", "error")
+
+    def test_shared_citation_is_mentioned(self):
+        r = vq.verify_claim(claim("completely invented sentence about nothing", shared=2), ctx("alpha", "beta"))
+        assert "shares citation with 2 other quotes" in r.note
+
+    def test_cross_language_only_after_a_failed_match(self):
+        english = ctx("The cell divides rapidly in culture and the cell grows.")
+        r = vq.verify_claim(claim("细胞在培养中分裂得非常迅速而且稳定", locs=(("unknown",),)), english)
+        assert (r.verdict, r.severity, r.kind) == ("unverifiable", "suggestion", "cross_language")
+        chinese = ctx("细胞在培养中分裂得非常迅速而且稳定，并且持续生长很长时间。")
+        r2 = vq.verify_claim(claim("the cell divides rapidly in culture", locs=(("unknown",),)), chinese)
+        assert r2.kind == "cross_language"
+
+    def test_a_chinese_quote_that_matches_is_never_called_cross_language(self):
+        english_with_chinese = ctx("English filler text. 细胞在培养中分裂得非常迅速而且稳定 more English.")
+        r = vq.verify_claim(claim("细胞在培养中分裂得非常迅速而且稳定", locs=(("unknown",),)), english_with_chinese)
+        assert r.verdict == "exact"
+
+    def test_mixed_script_quotes_stay_not_found(self):
+        english = ctx("Only English text about other things here.")
+        few_cjk = vq.verify_claim(claim("GDP 增长 in Q2 report", locs=(("unknown",),)), english)
+        assert few_cjk.verdict == "not_found"                       # fewer than 6 CJK letters: could be a term
+        mixed_raw = ctx("English text with 一些中文 mixed in, 约占百分之三十 of the letters, and more中文内容在这里。")
+        chinese = vq.verify_claim(claim("细胞在培养中分裂得非常迅速而且稳定", locs=(("unknown",),)), mixed_raw)
+        assert chinese.verdict == "not_found"                       # the raw has real Chinese text, so it may be there
+
+    def test_suggested_raw_when_the_quote_lives_in_another_file(self):
+        other = doc("something", "the quoted passage is right here", "more")
+        r = vq.verify_claim(claim("the quoted passage is right here"),
+                            ctx("alpha", "beta", others=lambda: iter([("raw/b.md", other)])))
+        assert (r.verdict, r.severity, r.suggested_raw) == ("not_found", "error", "raw/b.md")
+        assert "found verbatim in raw/b.md" in r.note
+
+    def test_unreadable_raw_is_unverifiable_infrastructure(self):
+        r = vq.verify_claim(claim("any quote that is long enough"), vq.Context(doc=None, unreadable="raw file missing"))
+        assert (r.verdict, r.severity, r.kind, r.note) == ("unverifiable", "suggestion", "infrastructure", "raw file missing")
+
+
+class TestSeverityDowngrades:
+    def not_found(self, **kw):
+        return vq.verify_claim(claim("completely invented sentence about nothing", **kw.pop("claim_kw", {})),
+                               ctx("alpha", "beta", **kw))
+
+    def test_lossy_conversion_downgrades_to_warning(self):
+        r = self.not_found(convert={"lossy": True})
+        assert (r.severity, r.kind) == ("warning", "downgraded") and "lossy" in r.note
+
+    def test_low_confidence_page_map_downgrades_only_page_citations(self):
+        pages = {"confidence": "low", "pages": []}
+        by_line = self.not_found(pages=pages)
+        by_page = self.not_found(pages=pages, claim_kw={"locs": (("p", 1, 1),)})
+        assert by_line.severity == "error" and by_page.severity == "warning"
+
+    def test_strict_keeps_errors(self):
+        r = self.not_found(convert={"lossy": True}, strict=True)
+        assert r.severity == "error"
+
+    def test_strict_promotes_near_miss(self, monkeypatch):
+        monkeypatch.setattr(vq, "fuzzy_best", lambda d, f, r: (72, (1, 1), 0))
+        c = claim("zzz qqq www vvv", locs=(("L", 1, 1),))
+        assert vq.verify_claim(c, ctx("a", strict=True)).severity == "error"
+        assert vq.verify_claim(c, ctx("a")).severity == "warning"

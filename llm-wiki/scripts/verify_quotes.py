@@ -384,3 +384,162 @@ def fuzzy_best(doc: Doc, fragment: str, line_range: tuple[int, int]) -> tuple[in
     if best_span is None:
         return 0, None, -1
     return best, (doc.line_of(offs[best_span[0]]), doc.line_of(offs[best_span[1]])), best_span[0]
+
+
+@dataclass
+class Result:
+    verdict: str            # exact | fuzzy | wrong_location | near_miss | not_found | unverifiable
+    severity: str           # none | suggestion | warning | error
+    score: int = 0
+    matched_lines: list[int] = field(default_factory=list)      # [first, last] or []
+    note: str = ""
+    suggested_raw: str | None = None
+    kind: str = ""          # unverifiable: infrastructure | cross_language; not_found: downgraded
+
+
+@dataclass
+class Context:
+    """Everything verify_claim needs to know about the cited raw file."""
+    doc: Doc | None
+    unreadable: str = ""
+    convert: dict | None = None            # the raw's convert.json
+    pages: dict | None = None              # the raw's pages.json
+    others: object = None                  # callable returning (rel_path, Doc) pairs, or None
+    threshold: int = THRESHOLD
+    near_miss: int = NEAR_MISS
+    strict: bool = False
+
+
+def is_short(quote: str) -> bool:
+    cjk = sum(1 for c in quote if is_cjk(c))
+    if cjk >= 0.3 * max(len(quote), 1):
+        return cjk < SHORT_CJK
+    return len(quote.split()) <= SHORT_WORDS
+
+
+def page_lines(pages_meta: dict, first_page: int, last_page: int) -> tuple[int, int] | None:
+    rows = {p["page"]: p for p in pages_meta.get("pages", [])}
+    if first_page not in rows or last_page not in rows:
+        return None
+    return rows[first_page]["line_start"], rows[last_page]["line_end"]
+
+
+def windows_for(claim: Claim, ctx: Context) -> list[tuple[int, int]] | None:
+    """Line ranges to search first, with SLACK. None means the whole file is the cited place."""
+    ranges = []
+    for loc in claim.locs:
+        if loc[0] == "L":
+            first, last = loc[1], loc[2]
+        elif loc[0] == "p" and ctx.pages and ctx.pages.get("pages"):
+            span = page_lines(ctx.pages, loc[1], loc[2])
+            if span is None:
+                return None
+            first, last = span
+        else:
+            return None
+        ranges.append((max(1, first - SLACK), last + SLACK))
+    return ranges or None
+
+
+def scripts_cannot_overlap(quote: str, raw_cjk_share: float) -> bool:
+    quote_cjk = sum(1 for c in quote if is_cjk(c))
+    if quote_cjk >= 6 and raw_cjk_share < 0.05:
+        return True
+    return quote_cjk == 0 and len(quote.split()) >= 3 and raw_cjk_share > 0.6
+
+
+def _fuzzy_over(doc: Doc, fragments: list[str], ranges: list[tuple[int, int]]) -> tuple[int, list[int]]:
+    best_per_fragment = []
+    for frag in fragments:
+        best: tuple[int, tuple[int, int] | None, int] = (0, None, -1)
+        for rng in ranges:
+            cand = fuzzy_best(doc, frag, rng)
+            if cand[0] > best[0]:
+                best = cand
+        best_per_fragment.append(best)
+    positions = [b[2] for b in best_per_fragment]
+    if len(positions) > 1 and any(a >= b for a, b in zip(positions, positions[1:])):
+        return 0, []                         # ellipsis fragments must appear in order
+    scores = [b[0] for b in best_per_fragment]
+    spans = [b[1] for b in best_per_fragment]
+    found = [s for s in spans if s]
+    lines = [min(s[0] for s in found), max(s[1] for s in found)] if found else []
+    return (min(scores) if scores else 0), lines
+
+
+def _apply_severity(result: Result, claim: Claim, ctx: Context) -> Result:
+    if result.verdict == "not_found" and not ctx.strict:
+        lossy = bool(ctx.convert and ctx.convert.get("lossy"))
+        low_pages = bool(ctx.pages and ctx.pages.get("confidence") == "low"
+                         and any(loc[0] == "p" for loc in claim.locs))
+        if lossy or low_pages:
+            result.severity = "warning"
+            result.kind = "downgraded"
+            reason = "raw is a lossy conversion" if lossy else "page map has low confidence"
+            result.note = f"{result.note}; {reason}" if result.note else reason
+    elif result.verdict == "near_miss" and ctx.strict:
+        result.severity = "error"
+    return result
+
+
+def _not_found(claim: Claim, ctx: Context, best: int) -> Result:
+    doc = ctx.doc
+    if scripts_cannot_overlap(claim.quote, doc.cjk_share):
+        return Result("unverifiable", "suggestion", best,
+                      note="cross-language quote; cite verbatim or paraphrase", kind="cross_language")
+    result = Result("not_found", "error", best)
+    notes = []
+    if claim.shared:
+        notes.append(f"shares citation with {claim.shared} other quotes")
+    if ctx.others:
+        for rel, other in ctx.others():
+            whole = [(1, max(other.n_lines, 1))]
+            if any(match_fragments(other, claim.fragments, rung, whole) for rung in ("literal", "loose")):
+                result.suggested_raw = rel
+                notes.append(f"found verbatim in {rel}")
+                break
+    result.note = "; ".join(notes)
+    return result
+
+
+def verify_claim(claim: Claim, ctx: Context) -> Result:
+    """Verdict for one quote. Scopes are tried cited-lines first, then the whole file; inside
+    a scope the ladder is literal, case-folded, loose; only then fuzzy similarity."""
+    if ctx.doc is None:
+        return Result("unverifiable", "suggestion", note=ctx.unreadable or "raw file unavailable",
+                      kind="infrastructure")
+    doc, frags = ctx.doc, claim.fragments
+    windows = windows_for(claim, ctx)
+    whole = [(1, max(doc.n_lines, 1))]
+    short = is_short(claim.quote)
+    scopes = ([("cited", windows)] if windows else []) + [("file", whole)]
+    for scope, ranges in scopes:
+        in_cited_place = scope == "cited" or windows is None
+        for rung in RUNGS:
+            lines = match_fragments(doc, frags, rung, ranges)
+            if lines is None:
+                continue
+            where = list(lines)
+            if not in_cited_place:
+                return Result("wrong_location", "warning", 100, where,
+                              f"found outside the cited lines ({rung})")
+            if rung == "literal":
+                return Result("exact", "none", 100, where)
+            if rung == "fold":
+                if short:
+                    return Result("fuzzy", "warning", 95, where, "case differs")
+                return Result("exact", "none", 100, where, "case differs")
+            return Result("exact", "none", 100, where, "loose")
+    cited_score, cited_lines = _fuzzy_over(doc, frags, windows or whole)
+    if cited_score >= ctx.threshold:
+        return Result("fuzzy", "warning", cited_score, cited_lines, "wording differs slightly")
+    file_score, file_lines = (cited_score, cited_lines) if not windows else _fuzzy_over(doc, frags, whole)
+    if windows and file_score >= ctx.threshold:
+        return Result("wrong_location", "warning", file_score, file_lines, "similar text outside the cited lines")
+    best, best_lines = (cited_score, cited_lines) if cited_score >= file_score else (file_score, file_lines)
+    if best >= ctx.near_miss:
+        result = Result("near_miss", "warning", best, best_lines,
+                        "wording differs; a paraphrase in quotation marks?")
+    else:
+        result = _not_found(claim, ctx, best)
+    return _apply_severity(result, claim, ctx)
