@@ -838,6 +838,29 @@ def print_summary(report: dict, report_path: Path | None, root: Path) -> None:
         print(f"Report: {report_path.relative_to(root) if root in report_path.parents else report_path}")
 
 
+def flag_report(root: Path, report: dict, dry_run: bool) -> int:
+    """Insert one FIX comment under each quote whose result is an error-severity not_found."""
+    import cascade_flag
+
+    edits: dict[str, list] = defaultdict(list)
+    for r in report["results"]:
+        if r["verdict"] != "not_found" or r["severity"] != "error":
+            continue
+        marker = f"[vq:{r['id']}]"
+        tag = f"<!-- FIX: quote not found {marker} in {r['raw']} {r['loc']}"
+        if r["suggested_raw"]:
+            tag += f"; found in {r['suggested_raw']}"
+        edits[r["page"]].append((r["line"] - 1, tag + " -->", marker))
+    total = 0
+    for page, page_edits in sorted(edits.items()):
+        added = cascade_flag.insert_fix_comments(root / page, page_edits, dry_run=dry_run)
+        total += added
+        if added:
+            print(f"  {'would add' if dry_run else 'added'} {added} FIX comment(s): {page}")
+    print(f"FIX comments {'that would be ' if dry_run else ''}added: {total}")
+    return total
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Verify quoted passages in wiki pages against the raw files they cite.")
     parser.add_argument("wiki_root", help="Path to the wiki root directory")
@@ -846,7 +869,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--report", default=None, help="Report path (default outputs/verify-quotes-YYYY-MM-DD.json)")
     parser.add_argument("--strict", action="store_true", help="Keep downgraded not_found and near_miss results as errors")
     parser.add_argument("--no-cache", action="store_true", help="Do not read or write .cache/verify_quotes.json")
+    parser.add_argument("--flag", action="store_true",
+                        help="Insert a <!-- FIX: --> comment under every quote that is not found (error severity only)")
+    parser.add_argument("--dry-run", action="store_true", help="With --flag: print the edits, change nothing")
     args = parser.parse_args(argv)
+    if args.dry_run and not args.flag:
+        parser.error("--dry-run only makes sense with --flag")
     root = Path(args.wiki_root).resolve()
     try:
         report = verify_wiki(root, args.page or None, threshold=args.threshold,
@@ -858,6 +886,8 @@ def main(argv: list[str] | None = None) -> int:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(report, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
     print_summary(report, path, root)
+    if args.flag:
+        flag_report(root, report, args.dry_run)
     return 1 if report["errors"] else 0
 
 

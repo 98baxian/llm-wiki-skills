@@ -711,3 +711,84 @@ class TestCli:
         target = tmp_path / "custom" / "r.json"
         assert vq.main([str(root), "--page", "wiki/concepts/x.md", "--report", str(target), "--no-cache"]) == 0
         assert json.loads(target.read_text())["pages_checked"] == 1
+
+
+"""verify_quotes --flag: one FIX comment per error-severity not_found, idempotent."""
+import audit_review
+
+
+def flag_vault(tmp_path, page, raw=None):
+    return make_vault(tmp_path, {"concepts/x.md": page}, raw or {"raw/articles/a.md": RAW})
+
+
+def page_text(root):
+    return (root / "wiki" / "concepts" / "x.md").read_text(encoding="utf-8")
+
+
+class TestFlag:
+    def test_inserts_one_comment_under_the_quote_line_and_is_idempotent(self, tmp_path, capsys):
+        root = flag_vault(tmp_path, "intro\n" + PAGE_BAD + "outro\n")
+        assert vq.main([str(root), "--flag", "--no-cache"]) == 1
+        lines = page_text(root).split("\n")
+        assert lines[1].startswith("A claim:") and lines[2].startswith("<!-- FIX: quote not found [vq:")
+        assert "in raw/articles/a.md L2 -->" in lines[2] and lines[3] == "outro"
+        before = page_text(root)
+        assert vq.main([str(root), "--flag", "--no-cache"]) == 1
+        assert page_text(root) == before
+        assert "FIX comments added: 0" in capsys.readouterr().out
+
+    def test_rewording_around_the_quote_does_not_duplicate(self, tmp_path):
+        root = flag_vault(tmp_path, PAGE_BAD)
+        vq.main([str(root), "--flag", "--no-cache"])
+        text = page_text(root).replace("A claim:", "A different claim:")
+        (root / "wiki" / "concepts" / "x.md").write_text(text, encoding="utf-8")
+        vq.main([str(root), "--flag", "--no-cache"])
+        assert page_text(root).count("<!-- FIX: quote not found") == 1
+
+    def test_several_errors_in_one_file_each_get_their_own_comment(self, tmp_path):
+        page = (
+            'First: "an entirely invented sentence about nothing" (raw/articles/a.md, L2)\n'
+            "middle\n"
+            'Second: "another fabricated statement of no origin" (raw/articles/a.md, L2)\n'
+        )
+        root = flag_vault(tmp_path, page)
+        vq.main([str(root), "--flag", "--no-cache"])
+        lines = page_text(root).split("\n")
+        assert lines[0].startswith("First:") and lines[1].startswith("<!-- FIX")
+        assert lines[2] == "middle"
+        assert lines[3].startswith("Second:") and lines[4].startswith("<!-- FIX")
+
+    def test_only_error_not_found_is_flagged(self, tmp_path):
+        raw = {"raw/articles/a.md": "x\n" * 30 + "the quoted passage is right here\n",      # wrong_location
+               "raw/converted/d/d.md": "something else\n",
+               "raw/converted/d/d.convert.json": '{"lossy": true}'}                         # downgraded not_found
+        page = (PAGE_OK +
+                'Lossy: "an entirely invented sentence about nothing" (raw/converted/d/d.md, L1)\n')
+        root = flag_vault(tmp_path, page, raw)
+        assert vq.main([str(root), "--flag", "--no-cache"]) == 0
+        assert "FIX" not in page_text(root)
+
+    def test_suggested_file_is_part_of_the_comment(self, tmp_path):
+        raw = {"raw/articles/a.md": RAW, "raw/articles/b.md": "an entirely invented sentence about nothing\n"}
+        root = flag_vault(tmp_path, PAGE_BAD, raw)
+        vq.main([str(root), "--flag", "--no-cache"])
+        assert "found in raw/articles/b.md" in page_text(root)
+
+    def test_dry_run_prints_and_changes_nothing(self, tmp_path, capsys):
+        root = flag_vault(tmp_path, PAGE_BAD)
+        before = page_text(root)
+        assert vq.main([str(root), "--flag", "--dry-run", "--no-cache"]) == 1
+        assert page_text(root) == before and "would add" in capsys.readouterr().out
+
+    def test_dry_run_alone_is_a_usage_error(self, tmp_path):
+        import pytest
+        root = flag_vault(tmp_path, PAGE_OK)
+        with pytest.raises(SystemExit) as exc:
+            vq.main([str(root), "--dry-run"])
+        assert exc.value.code == 2
+
+    def test_audit_review_picks_the_comment_up(self, tmp_path):
+        root = flag_vault(tmp_path, PAGE_BAD)
+        vq.main([str(root), "--flag", "--no-cache"])
+        entries = audit_review.scan_fix_comments(root)
+        assert len(entries) == 1 and "quote not found" in str(entries[0])

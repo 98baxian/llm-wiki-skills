@@ -21,8 +21,9 @@ import sys
 import argparse
 from pathlib import Path
 
+import citations
 
-CITATION_LINE_RE = re.compile(r"\((raw/[^,)]+),")
+FIX_PREFIX = "<!-- FIX:"
 FIX_TAG = "<!-- FIX: raw source changed (sha256 mismatch) — re-verify this claim -->"
 
 
@@ -62,42 +63,51 @@ def find_modified_sources(wiki_root: Path) -> set[str]:
     return modified
 
 
-def flag_citations_in_file(wiki_file: Path, modified_sources: set[str],
-                            dry_run: bool = False) -> int:
-    """Add FIX comments to lines that cite a modified source. Returns count added."""
+def insert_fix_comments(wiki_file: Path, edits: list[tuple[int, str, str]],
+                        dry_run: bool = False) -> int:
+    """Insert FIX comments. ``edits`` holds ``(line_index, tag, marker)``: ``tag`` goes on the line
+    after ``line_index`` (0-based), unless ``marker`` already appears on that line or in the FIX
+    comments directly below it, so running twice adds nothing. Edits are applied from the last line
+    to the first, so earlier indices stay valid. Returns the number of comments added."""
     try:
         original = wiki_file.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return 0
-
-    lines = original.splitlines(keepends=True)
-    new_lines: list[str] = []
+    lines = re.split(r"(?<=\n)", original)          # keeps each "\n"; indices match text.split("\n")
     added = 0
-
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-        # Check if this line cites a raw file that has changed
-        match = CITATION_LINE_RE.search(line)
-        if match:
-            cited_raw = match.group(1).strip()  # e.g. "raw/articles/bert-paper.md"
-            if cited_raw in modified_sources:
-                # Check that we haven't already added a FIX comment on the next line
-                next_line = lines[i + 1] if i + 1 < len(lines) else ""
-                if FIX_TAG not in next_line and FIX_TAG not in line:
-                    new_lines.append(line)
-                    eol = "\n" if not line.endswith("\n") else ""
-                    new_lines.append(FIX_TAG + eol + "\n")
-                    added += 1
-                    i += 1
-                    continue
-        new_lines.append(line)
-        i += 1
-
-    if added > 0 and not dry_run:
-        wiki_file.write_text("".join(new_lines), encoding="utf-8")
-
+    for idx, tag, marker in sorted(edits, key=lambda e: -e[0]):
+        if idx >= len(lines) or marker in lines[idx]:
+            continue
+        j = idx + 1
+        duplicate = False
+        while j < len(lines) and lines[j].lstrip().startswith(FIX_PREFIX):
+            if marker in lines[j]:
+                duplicate = True
+                break
+            j += 1
+        if duplicate:
+            continue
+        if not lines[idx].endswith("\n"):
+            lines[idx] += "\n"
+        lines.insert(idx + 1, tag + "\n")
+        added += 1
+    if added and not dry_run:
+        wiki_file.write_text("".join(lines), encoding="utf-8")
     return added
+
+
+def flag_citations_in_file(wiki_file: Path, modified_sources: set[str],
+                            dry_run: bool = False) -> int:
+    """Add a FIX comment under each line that cites a modified source. Returns count added."""
+    try:
+        original = wiki_file.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return 0
+    edits = []
+    for i, line in enumerate(original.split("\n")):
+        if any(c.raw in modified_sources for c in citations.find_citations(line)):
+            edits.append((i, FIX_TAG, FIX_TAG))
+    return insert_fix_comments(wiki_file, edits, dry_run)
 
 
 def cascade_flag(root: str, target_file: str | None = None,
