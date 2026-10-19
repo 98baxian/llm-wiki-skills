@@ -307,3 +307,125 @@ def align_pages(markdown: str, pages: list[dict]) -> tuple[list[dict], float, st
         })
     rate = matched / body if body else 0.0
     return ranges, rate, "high" if rate >= CONFIDENCE_THRESHOLD else "low"
+
+
+MINERU_SCHEMA = ("docvortex.middle", "2.0")
+
+
+class WindowKilled(Exception):
+    """mineru-kit died from a signal (rc -9 / 137): most likely out of memory."""
+
+
+@dataclass
+class WindowResult:
+    markdown: str
+    middle: dict
+    images: dict[str, bytes]
+
+
+def find_mineru_kit() -> str | None:
+    env = os.environ.get("MINERU_KIT_BIN")
+    if env and Path(env).exists():
+        return env
+    home = Path.home() / ".local" / "bin" / "mineru-kit"
+    if home.exists():
+        return str(home)
+    return shutil.which("mineru-kit")
+
+
+def pdf_page_count(pdf) -> int:
+    exe = shutil.which("pdfinfo")
+    if not exe:
+        raise ConvertError("pdfinfo not found (install poppler-utils): needed to split the PDF into page windows", EXIT_USAGE)
+    p = subprocess.run([exe, str(pdf)], capture_output=True, text=True, timeout=60)
+    m = re.search(r"^Pages:\s+(\d+)", p.stdout, re.M)
+    if p.returncode != 0 or not m:
+        raise ConvertError(f"pdfinfo could not read {pdf}: {p.stderr.strip()[:200]}", EXIT_FAILED)
+    return int(m.group(1))
+
+
+def plan_windows(total: int, size: int = WINDOW_PAGES) -> list[tuple[int, int]]:
+    return [(a, min(a + size - 1, total)) for a in range(1, total + 1, size)]
+
+
+def read_kit_zip(zip_path) -> WindowResult:
+    with zipfile.ZipFile(zip_path) as z:
+        markdown = z.read("markdown.md").decode("utf-8")
+        middle = json.loads(z.read("middle_json.json"))
+        images = {n: z.read(n) for n in z.namelist() if n.startswith("images/") and not n.endswith("/")}
+    return WindowResult(markdown, middle, images)
+
+
+def run_kit_window(kit: str, pdf, first: int, last: int, tier: str, timeout: int) -> WindowResult:
+    """One ``mineru-kit parse -f zip`` run over pages first..last (1-based, inclusive).
+
+    Never passes --remote / --remote-url / --api-key. CPU tiers run with the GPU hidden.
+    """
+    env = dict(os.environ)
+    if tier in CPU_TIERS:
+        env["CUDA_VISIBLE_DEVICES"] = ""
+    span = str(first) if first == last else f"{first}-{last}"
+    with tempfile.TemporaryDirectory(prefix="llmwiki-kit-") as tmp:
+        cmd = [kit, "parse", str(pdf), "-o", tmp, "-f", "zip", "-p", span, "--tier", tier]
+        try:
+            p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=env)
+        except subprocess.TimeoutExpired:
+            raise ConvertError(f"mineru-kit timed out after {timeout}s on pages {span}", EXIT_FAILED)
+        except OSError as e:
+            raise ConvertError(f"cannot run mineru-kit: {e}", EXIT_USAGE)
+        if p.returncode in (-9, 137):
+            raise WindowKilled(f"pages {span}")
+        if p.returncode != 0:
+            raise ConvertError(f"mineru-kit failed on pages {span}: {p.stderr.strip()[-300:]}", EXIT_FAILED)
+        zips = sorted(Path(tmp).glob("*.zip"))
+        if not zips:
+            raise ConvertError(f"mineru-kit wrote no zip for pages {span}", EXIT_FAILED)
+        return read_kit_zip(zips[0])
+
+
+def run_with_halving(runner, first: int, last: int) -> list:
+    """Run a window; if it is killed, retry as two half windows, down to one page."""
+    try:
+        return [runner(first, last)]
+    except WindowKilled:
+        if first == last:
+            raise ConvertError(f"mineru-kit was killed on page {first} (probably out of memory)", EXIT_FAILED)
+        mid = (first + last) // 2
+        return run_with_halving(runner, first, mid) + run_with_halving(runner, mid + 1, last)
+
+
+def convert_mineru(pdf, tier: str = "basic", timeout: int = DEFAULT_TIMEOUT, *, runner=None,
+                   total_pages: int | None = None, window: int = WINDOW_PAGES) -> Output:
+    if runner is None:
+        kit = find_mineru_kit()
+        if not kit:
+            raise ConvertError("mineru-kit not found (set MINERU_KIT_BIN or install MinerU), or configure another converter", EXIT_USAGE)
+
+        def runner(first, last):
+            return run_kit_window(kit, pdf, first, last, tier, timeout)
+
+    total = total_pages or pdf_page_count(pdf)
+    results: list[WindowResult] = []
+    for first, last in plan_windows(total, window):
+        results.extend(run_with_halving(runner, first, last))
+    markdown = "\n\n".join(r.markdown.strip("\n") for r in results) + "\n"
+    pages = [pg for r in results for pg in r.middle.get("pages", [])]
+    images: dict[str, bytes] = {}
+    for r in results:
+        images.update(r.images)
+    producer = results[0].middle.get("metadata", {}).get("producer", {})
+    out = Output(
+        markdown=markdown, converter="mineru-kit", version=str(producer.get("version", "unknown")),
+        lossy=False, pages_total=total, images=images, dropped_types=list(DROPPED_TYPES),
+    )
+    schema_ok = all(
+        (r.middle.get("schema"), r.middle.get("schema_version")) == MINERU_SCHEMA for r in results
+    )
+    if schema_ok:
+        out.pages, out.match_rate, out.confidence = align_pages(markdown, pages)
+        out.page_map = "aligned"
+        out.dropped_lines = dropped_lines(pages)
+    else:
+        out.confidence = "low"
+        print("warning: unexpected MinerU middle_json schema; page map skipped", file=sys.stderr)
+    return out

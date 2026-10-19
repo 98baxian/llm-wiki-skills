@@ -301,3 +301,177 @@ class TestDroppedLines:
 
     def test_flat_text_handles_nested_content(self):
         assert convert_source.flat_text([{"type": "text", "content": "a"}, {"content": ["b", "c"]}]) == "a b c"
+
+
+"""MinerU converter: page windows, kill-and-halve retry, zip reading, schema guard."""
+import io
+import json
+import os
+import stat
+import sys
+import zipfile
+
+import pytest
+
+import convert_source
+
+FAKE_KIT = '''#!__PYTHON__
+import json, os, signal, sys, time, zipfile
+argv = sys.argv[1:]
+out = argv[argv.index("-o") + 1]
+span = argv[argv.index("-p") + 1]
+first, _, last = span.partition("-")
+first = int(first)
+last = int(last or first)
+with open(os.environ["FAKE_KIT_LOG"], "a") as log:
+    log.write(json.dumps({"argv": argv, "cuda": os.environ.get("CUDA_VISIBLE_DEVICES")}) + "\\n")
+if os.environ.get("FAKE_KIT_SLEEP"):
+    time.sleep(float(os.environ["FAKE_KIT_SLEEP"]))
+limit = os.environ.get("FAKE_KIT_KILL_OVER")
+if limit and last - first + 1 > int(limit):
+    os.kill(os.getpid(), signal.SIGKILL)
+md, pages = [], []
+for n in range(first, last + 1):
+    text = f"Page {n} paragraph with enough words to align."
+    md.append(text)
+    pages.append({"page_idx": n - 1, "blocks": [
+        {"type": "header", "content": "running header"},
+        {"type": "text", "content": text},
+    ]})
+middle = {"schema": "docvortex.middle", "schema_version": os.environ.get("FAKE_KIT_SCHEMA", "2.0"),
+          "metadata": {"producer": {"name": "mineru", "version": "9.9.9"}}, "pages": pages}
+with zipfile.ZipFile(os.path.join(out, "doc.zip"), "w") as z:
+    z.writestr("markdown.md", "\\n\\n".join(md) + "\\n")
+    z.writestr("middle_json.json", json.dumps(middle))
+    z.writestr("images/img_%d.jpg" % first, b"JPG")
+'''
+
+
+@pytest.fixture
+def kit(tmp_path, monkeypatch):
+    path = tmp_path / "fake-kit"
+    path.write_text(FAKE_KIT.replace("__PYTHON__", sys.executable), encoding="utf-8")
+    path.chmod(path.stat().st_mode | stat.S_IXUSR)
+    log = tmp_path / "kit.log"
+    monkeypatch.setenv("FAKE_KIT_LOG", str(log))
+    monkeypatch.setenv("MINERU_KIT_BIN", str(path))
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    return path, log
+
+
+def calls(log):
+    return [json.loads(line) for line in log.read_text().splitlines()]
+
+
+def test_plan_windows():
+    assert convert_source.plan_windows(20, 8) == [(1, 8), (9, 16), (17, 20)]
+    assert convert_source.plan_windows(3, 8) == [(1, 3)]
+
+
+def test_find_mineru_kit_prefers_env(kit):
+    assert convert_source.find_mineru_kit() == str(kit[0])
+
+
+def test_find_mineru_kit_missing(monkeypatch, tmp_path):
+    monkeypatch.delenv("MINERU_KIT_BIN", raising=False)
+    monkeypatch.setattr(convert_source.Path, "home", classmethod(lambda cls: tmp_path))
+    monkeypatch.setattr(convert_source.shutil, "which", lambda name: None)
+    assert convert_source.find_mineru_kit() is None
+
+
+def test_read_kit_zip(tmp_path):
+    buf = tmp_path / "x.zip"
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("markdown.md", "# T\n")
+        z.writestr("middle_json.json", json.dumps({"pages": []}))
+        z.writestr("images/a.jpg", b"A")
+        z.writestr("model_output.json", "{}")
+    res = convert_source.read_kit_zip(buf)
+    assert res.markdown == "# T\n" and res.middle == {"pages": []} and res.images == {"images/a.jpg": b"A"}
+
+
+def test_window_command_has_no_remote_flags_and_hides_gpu_on_cpu_tiers(kit, tmp_path):
+    pdf = tmp_path / "d.pdf"
+    pdf.write_bytes(b"%PDF")
+    convert_source.run_kit_window(str(kit[0]), pdf, 1, 2, "basic", 60)
+    convert_source.run_kit_window(str(kit[0]), pdf, 3, 3, "standard", 60)
+    first, second = calls(kit[1])
+    assert first["argv"][:2] == ["parse", str(pdf)]
+    assert first["argv"][first["argv"].index("-f") + 1] == "zip"
+    assert first["argv"][first["argv"].index("-p") + 1] == "1-2"
+    assert second["argv"][second["argv"].index("-p") + 1] == "3"
+    for call in (first, second):
+        assert not any(a.startswith("--remote") or a == "--api-key" for a in call["argv"])
+    assert first["cuda"] == ""          # basic tier: GPU hidden
+    assert second["cuda"] is None       # standard tier: left alone
+
+
+def test_killed_window_raises_windowkilled(kit, tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_KIT_KILL_OVER", "1")
+    pdf = tmp_path / "d.pdf"
+    pdf.write_bytes(b"%PDF")
+    with pytest.raises(convert_source.WindowKilled):
+        convert_source.run_kit_window(str(kit[0]), pdf, 1, 2, "basic", 60)
+
+
+def test_timeout_is_a_failure(kit, tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_KIT_SLEEP", "5")
+    pdf = tmp_path / "d.pdf"
+    pdf.write_bytes(b"%PDF")
+    with pytest.raises(convert_source.ConvertError) as exc:
+        convert_source.run_kit_window(str(kit[0]), pdf, 1, 1, "basic", 1)
+    assert exc.value.code == convert_source.EXIT_FAILED and "timed out" in str(exc.value)
+
+
+class TestHalving:
+    def test_halves_until_windows_fit(self):
+        seen = []
+
+        def runner(first, last):
+            seen.append((first, last))
+            if last - first + 1 > 2:
+                raise convert_source.WindowKilled()
+            return (first, last)
+
+        assert convert_source.run_with_halving(runner, 1, 8) == [(1, 2), (3, 4), (5, 6), (7, 8)]
+        assert seen[0] == (1, 8)
+
+    def test_single_page_that_dies_fails_with_exit_3(self):
+        def runner(first, last):
+            raise convert_source.WindowKilled()
+
+        with pytest.raises(convert_source.ConvertError) as exc:
+            convert_source.run_with_halving(runner, 4, 4)
+        assert exc.value.code == convert_source.EXIT_FAILED and "page 4" in str(exc.value)
+
+
+class TestConvertMineru:
+    def _pdf(self, tmp_path):
+        pdf = tmp_path / "d.pdf"
+        pdf.write_bytes(b"%PDF")
+        return pdf
+
+    def test_end_to_end_with_halving_and_merge(self, kit, tmp_path, monkeypatch):
+        monkeypatch.setenv("FAKE_KIT_KILL_OVER", "2")
+        out = convert_source.convert_mineru(self._pdf(tmp_path), "basic", 60, total_pages=5, window=4)
+        assert [c["argv"][c["argv"].index("-p") + 1] for c in calls(kit[1])] == ["1-4", "1-2", "3-4", "5"]
+        assert out.markdown.count("paragraph with enough words") == 5
+        assert out.markdown.index("Page 1 ") < out.markdown.index("Page 5 ")
+        assert out.converter == "mineru-kit" and out.version == "9.9.9" and out.lossy is False
+        assert out.page_map == "aligned" and out.confidence == "high" and out.pages_total == 5
+        assert [p["page"] for p in out.pages] == [1, 2, 3, 4, 5]
+        assert set(out.images) == {"images/img_1.jpg", "images/img_3.jpg", "images/img_5.jpg"}
+        assert out.dropped_lines[0] == "p1\theader\trunning header"
+
+    def test_unknown_schema_skips_page_map_but_succeeds(self, kit, tmp_path, monkeypatch, capsys):
+        monkeypatch.setenv("FAKE_KIT_SCHEMA", "3.0")
+        out = convert_source.convert_mineru(self._pdf(tmp_path), "basic", 60, total_pages=2)
+        assert out.pages is None and out.page_map == "none" and out.confidence == "low"
+        assert "schema" in capsys.readouterr().err
+
+    def test_missing_kit_exit_2(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("MINERU_KIT_BIN", raising=False)
+        monkeypatch.setattr(convert_source, "find_mineru_kit", lambda: None)
+        with pytest.raises(convert_source.ConvertError) as exc:
+            convert_source.convert_mineru(self._pdf(tmp_path), "basic", 60, total_pages=1)
+        assert exc.value.code == convert_source.EXIT_USAGE
