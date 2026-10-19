@@ -104,3 +104,67 @@ def sha256_file(path) -> str:
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+@dataclass
+class Output:
+    """What a converter hands back; ``convert()`` turns it into files."""
+    markdown: str
+    converter: str
+    version: str = "unknown"
+    lossy: bool = False
+    pages: list[dict] | None = None        # [{"page", "line_start", "line_end", "how"}]
+    match_rate: float | None = None
+    confidence: str | None = None          # "high" | "low"
+    page_map: str = "none"                 # "exact" | "aligned" | "none"
+    pages_total: int | None = None
+    dropped_lines: list[str] = field(default_factory=list)
+    images: dict[str, bytes] = field(default_factory=dict)   # "images/x.jpg" -> bytes
+    dropped_types: list[str] = field(default_factory=list)
+
+
+def tool_version(exe: str, flag: str = "-v") -> str:
+    try:
+        p = subprocess.run([exe, flag], capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+    first = (p.stderr or p.stdout).strip().splitlines()
+    return first[0].strip() if first else "unknown"
+
+
+def pdftotext_pages(pdf, timeout: int = DEFAULT_TIMEOUT) -> list[str]:
+    exe = shutil.which("pdftotext")
+    if not exe:
+        raise ConvertError("pdftotext not found (install poppler-utils), or configure another converter", EXIT_USAGE)
+    try:
+        p = subprocess.run([exe, str(pdf), "-"], capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise ConvertError(f"pdftotext timed out after {timeout}s", EXIT_FAILED)
+    if p.returncode != 0:
+        raise ConvertError(f"pdftotext failed: {p.stderr.strip()[:200]}", EXIT_FAILED)
+    pages = p.stdout.split("\x0c")
+    if pages and not pages[-1].strip():
+        pages.pop()
+    return pages
+
+
+def convert_pdftotext(pdf, timeout: int = DEFAULT_TIMEOUT) -> Output:
+    pages = pdftotext_pages(pdf, timeout)
+    if sum(len(re.sub(r"\s", "", p)) for p in pages) < MIN_PDFTOTEXT_CHARS:
+        raise ConvertError("scanned PDF: pdftotext found no text layer; needs MinerU or your own converter", EXIT_SCANNED)
+    lines: list[str] = []
+    ranges: list[dict] = []
+    for number, text in enumerate(pages, 1):
+        if lines:
+            lines.append("")                      # blank separator, owned by the previous page
+            ranges[-1]["line_end"] = len(lines)
+        body = [ln.rstrip() for ln in text.strip("\n").split("\n")]
+        start = len(lines) + 1
+        lines.extend(body)
+        ranges.append({"page": number, "line_start": start, "line_end": len(lines), "how": "exact"})
+    exe = shutil.which("pdftotext") or "pdftotext"
+    return Output(
+        markdown="\n".join(lines) + "\n", converter="pdftotext", version=tool_version(exe),
+        lossy=True, pages=ranges, match_rate=1.0, confidence="high", page_map="exact",
+        pages_total=len(pages),
+    )
