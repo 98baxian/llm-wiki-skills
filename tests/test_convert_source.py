@@ -104,3 +104,99 @@ def test_missing_pdftotext_exits_2(tmp_path, monkeypatch):
     with pytest.raises(convert_source.ConvertError) as exc:
         convert_source.pdftotext_pages(tmp_path / "x.pdf")
     assert exc.value.code == convert_source.EXIT_USAGE
+
+
+"""Custom command converter: the user's own tool, run without a shell."""
+import json
+import shlex
+import sys
+
+import pytest
+
+import convert_source
+
+SCRIPT = '''
+import json, os, pathlib, sys, time
+pdf, outdir, slug = sys.argv[1:4]
+if os.environ.get("FAKE_CMD_SLEEP"):
+    time.sleep(float(os.environ["FAKE_CMD_SLEEP"]))
+if os.environ.get("FAKE_CMD_FAIL"):
+    sys.stderr.write("boom from tool")
+    sys.exit(1)
+out = pathlib.Path(outdir)
+if not os.environ.get("FAKE_CMD_NO_MD"):
+    (out / (slug + ".md")).write_text("Converted line one\\nConverted line two\\n", encoding="utf-8")
+if os.environ.get("FAKE_CMD_PAGES"):
+    (out / (slug + ".pages.json")).write_text(json.dumps({
+        "match_rate": 1.0, "confidence": "high",
+        "pages": [{"page": 1, "line_start": 1, "line_end": 2, "how": "exact"}]}), encoding="utf-8")
+    (out / "images").mkdir()
+    (out / "images" / "fig.png").write_bytes(b"PNG")
+with open(os.environ.get("FAKE_CMD_LOG", os.devnull), "a") as log:
+    log.write(pdf + "\\n")
+'''
+
+
+@pytest.fixture
+def tool(tmp_path):
+    script = tmp_path / "tool.py"
+    script.write_text(SCRIPT, encoding="utf-8")
+    template = f"{shlex.quote(sys.executable)} {shlex.quote(str(script))} {{input}} {{outdir}} {{slug}}"
+    return template
+
+
+def test_writes_markdown_only(tool, tmp_path):
+    pdf = tmp_path / "My Paper (final).pdf"        # spaces and parentheses must survive intact
+    pdf.write_bytes(b"%PDF")
+    out = convert_source.convert_command(tool, pdf, "my-paper")
+    assert out.markdown == "Converted line one\nConverted line two\n"
+    assert (out.converter, out.version, out.lossy, out.page_map) == ("command", "custom", False, "none")
+    assert out.pages is None and out.images == {}
+
+
+def test_pages_json_and_images_are_picked_up(tool, tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_CMD_PAGES", "1")
+    pdf = tmp_path / "x.pdf"
+    pdf.write_bytes(b"%PDF")
+    out = convert_source.convert_command(tool, pdf, "x")
+    assert out.page_map == "supplied" and out.confidence == "high"
+    assert out.pages[0]["page"] == 1
+    assert out.images == {"images/fig.png": b"PNG"}
+
+
+def test_missing_markdown_is_a_failure(tool, tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_CMD_NO_MD", "1")
+    pdf = tmp_path / "x.pdf"
+    pdf.write_bytes(b"%PDF")
+    with pytest.raises(convert_source.ConvertError) as exc:
+        convert_source.convert_command(tool, pdf, "x")
+    assert exc.value.code == convert_source.EXIT_FAILED and "x.md" in str(exc.value)
+
+
+def test_nonzero_exit_reports_stderr(tool, tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_CMD_FAIL", "1")
+    pdf = tmp_path / "x.pdf"
+    pdf.write_bytes(b"%PDF")
+    with pytest.raises(convert_source.ConvertError) as exc:
+        convert_source.convert_command(tool, pdf, "x")
+    assert exc.value.code == convert_source.EXIT_FAILED and "boom from tool" in str(exc.value)
+
+
+def test_timeout(tool, tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_CMD_SLEEP", "5")
+    pdf = tmp_path / "x.pdf"
+    pdf.write_bytes(b"%PDF")
+    with pytest.raises(convert_source.ConvertError) as exc:
+        convert_source.convert_command(tool, pdf, "x", timeout=1)
+    assert exc.value.code == convert_source.EXIT_FAILED and "timed out" in str(exc.value)
+
+
+def test_unknown_program_and_empty_template_exit_2(tmp_path):
+    pdf = tmp_path / "x.pdf"
+    pdf.write_bytes(b"%PDF")
+    with pytest.raises(convert_source.ConvertError) as exc:
+        convert_source.convert_command("no-such-program-xyz {input} {outdir}", pdf, "x")
+    assert exc.value.code == convert_source.EXIT_USAGE
+    with pytest.raises(convert_source.ConvertError) as exc:
+        convert_source.convert_command("  ", pdf, "x")
+    assert exc.value.code == convert_source.EXIT_USAGE

@@ -168,3 +168,48 @@ def convert_pdftotext(pdf, timeout: int = DEFAULT_TIMEOUT) -> Output:
         lossy=True, pages=ranges, match_rate=1.0, confidence="high", page_map="exact",
         pages_total=len(pages),
     )
+
+
+def convert_command(template: str, pdf, slug: str, timeout: int = DEFAULT_TIMEOUT) -> Output:
+    """Run the user's own converter: ``{input}``, ``{outdir}`` and ``{slug}`` are substituted,
+    no shell is involved. The tool must write ``{outdir}/<slug>.md``; ``<slug>.pages.json``
+    and an ``images/`` directory are optional."""
+    if not template.strip():
+        raise ConvertError('converter "command" needs a `command:` line under ## Document conversion', EXIT_USAGE)
+    pdf = Path(pdf)
+    with tempfile.TemporaryDirectory(prefix="llmwiki-cmd-") as tmp:
+        outdir = Path(tmp)
+        argv = [
+            tok.replace("{input}", str(pdf)).replace("{outdir}", str(outdir)).replace("{slug}", slug)
+            for tok in shlex.split(template)
+        ]
+        try:
+            p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, cwd=tmp)
+        except FileNotFoundError:
+            raise ConvertError(f"converter command not found: {argv[0]}", EXIT_USAGE)
+        except subprocess.TimeoutExpired:
+            raise ConvertError(f"converter command timed out after {timeout}s", EXIT_FAILED)
+        if p.returncode != 0:
+            raise ConvertError(f"converter command failed ({p.returncode}): {p.stderr.strip()[:300]}", EXIT_FAILED)
+        md_path = outdir / f"{slug}.md"
+        if not md_path.is_file():
+            raise ConvertError(f"converter command did not write {slug}.md into the output directory", EXIT_FAILED)
+        out = Output(markdown=md_path.read_text(encoding="utf-8"), converter="command", version="custom")
+        pages_path = outdir / f"{slug}.pages.json"
+        if pages_path.is_file():
+            try:
+                data = json.loads(pages_path.read_text(encoding="utf-8"))
+                if isinstance(data.get("pages"), list) and data["pages"]:
+                    out.pages = data["pages"]
+                    out.match_rate = data.get("match_rate")
+                    out.confidence = data.get("confidence", "low")
+                    out.page_map = "supplied"
+                    out.pages_total = len(out.pages)
+            except (ValueError, AttributeError):
+                pass  # an unreadable pages.json only costs the page map
+        image_dir = outdir / "images"
+        if image_dir.is_dir():
+            for f in sorted(image_dir.rglob("*")):
+                if f.is_file():
+                    out.images[f"images/{f.relative_to(image_dir).as_posix()}"] = f.read_bytes()
+        return out
