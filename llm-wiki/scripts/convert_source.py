@@ -213,3 +213,97 @@ def convert_command(template: str, pdf, slug: str, timeout: int = DEFAULT_TIMEOU
                 if f.is_file():
                     out.images[f"images/{f.relative_to(image_dir).as_posix()}"] = f.read_bytes()
         return out
+
+
+SKIP_TYPES = {"header", "footer", "page_number", "page_footnote", "table"}
+DROPPED_TYPES = ("header", "footer", "page_number", "page_footnote")
+KEY_LEN = 25
+MIN_BLOCK_CHARS = 12
+CONFIDENCE_THRESHOLD = 0.8
+
+
+def flat_text(content) -> str:
+    """Flatten a MinerU block ``content`` (str, list or dict) into plain text."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return " ".join(flat_text(c) for c in content)
+    if isinstance(content, dict):
+        return flat_text(content.get("content", ""))
+    return ""
+
+
+def dropped_lines(pages: list[dict]) -> list[str]:
+    """``p<N>\\t<type>\\t<text>`` for blocks MinerU leaves out of the markdown, once per page."""
+    out: list[str] = []
+    for page in pages:
+        number = page.get("page_idx", 0) + 1
+        seen: set[tuple[str, str]] = set()
+        for block in page.get("blocks", []):
+            kind = block.get("type")
+            if kind not in DROPPED_TYPES:
+                continue
+            text = " ".join(flat_text(block.get("content", "")).split())
+            if not text or (kind, text) in seen:
+                continue
+            seen.add((kind, text))
+            out.append(f"p{number}\t{kind}\t{text}")
+    return out
+
+
+def align_pages(markdown: str, pages: list[dict]) -> tuple[list[dict], float, str]:
+    """Map MinerU pages to markdown line ranges.
+
+    Body blocks are searched forward from the previous match (so repeated text maps to
+    its later occurrence) by their first ``KEY_LEN`` characters after case folding.
+    Ranges are returned as a partition of the markdown: each page runs up to the line
+    before the next page starts. Returns ``(ranges, match_rate, confidence)``.
+    """
+    lines = markdown.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    folded = [textnorm.fold_case(line) for line in lines]
+    total = len(lines)
+    cursor = 0
+    body = matched = 0
+    found: list[list[int]] = []
+    for page in pages:
+        hits: list[int] = []
+        for block in page.get("blocks", []):
+            if block.get("type") in SKIP_TYPES:
+                continue
+            text = textnorm.fold_case(flat_text(block.get("content", "")))
+            if len(text) < MIN_BLOCK_CHARS:
+                continue
+            body += 1
+            key = text[:KEY_LEN]
+            for i in range(cursor, total):
+                if key in folded[i]:
+                    hits.append(i + 1)
+                    cursor = i
+                    matched += 1
+                    break
+        found.append(hits)
+    starts: list[int] = []
+    last_end = 0
+    for hits in found:
+        previous = starts[-1] if starts else 1
+        if hits:
+            starts.append(max(min(hits), previous))
+            last_end = max(hits)
+        else:
+            starts.append(max(last_end + 1, previous))
+    if starts:
+        starts[0] = 1
+    starts = [min(s, max(total, 1)) for s in starts]
+    ranges = []
+    for k, page in enumerate(pages):
+        end = starts[k + 1] - 1 if k + 1 < len(starts) else total
+        ranges.append({
+            "page": page.get("page_idx", k) + 1,
+            "line_start": starts[k],
+            "line_end": max(end, starts[k]),
+            "how": "aligned" if found[k] else "interpolated",
+        })
+    rate = matched / body if body else 0.0
+    return ranges, rate, "high" if rate >= CONFIDENCE_THRESHOLD else "low"

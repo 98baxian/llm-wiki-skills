@@ -200,3 +200,104 @@ def test_unknown_program_and_empty_template_exit_2(tmp_path):
     with pytest.raises(convert_source.ConvertError) as exc:
         convert_source.convert_command("  ", pdf, "x")
     assert exc.value.code == convert_source.EXIT_USAGE
+
+
+"""Page map: align MinerU blocks with markdown lines."""
+import convert_source
+
+MD = "\n".join([
+    "# Evidence Aggregator for rare disease",                              # 1
+    "",                                                                   # 2
+    "Retrieving and synthesizing technical information is hard work.",    # 3
+    "",                                                                   # 4
+    "## Introduction",                                                    # 5
+    "",                                                                   # 6
+    "Rare diseases affect many people worldwide and diagnosis is slow.",  # 7
+    "",                                                                   # 8
+    "![](images/page_2_image_4.jpg)",                                     # 9
+    "",                                                                   # 10
+    "We evaluated the tool with a set of solved cases from the clinic.",  # 11
+    "",                                                                   # 12
+    "| System | Score |",                                                 # 13
+    "| --- | --- |",                                                      # 14
+    "| Ours | 91 |",                                                      # 15
+    "",                                                                   # 16
+    "Retrieving and synthesizing technical information is hard work.",    # 17 (repeated text)
+]) + "\n"
+
+
+def blk(kind, text):
+    return {"type": kind, "content": text}
+
+
+PAGES = [
+    {"page_idx": 0, "blocks": [
+        blk("header", "bioRxiv preprint doi: 10.1101/2025.03.10"),
+        blk("doc_title", "Evidence Aggregator for rare disease"),
+        blk("text", "Retrieving and synthesizing technical information is hard work."),
+        blk("text", "- PREPRINT - Page 1 of 22"),
+        blk("page_number", "1"),
+    ]},
+    {"page_idx": 1, "blocks": [
+        blk("paragraph_title", "Introduction"),
+        blk("text", "Rare diseases affect many people worldwide and diagnosis is slow."),
+        blk("page_footnote", "1 https://example.org/tool"),
+    ]},
+    {"page_idx": 2, "blocks": [
+        blk("text", "We evaluated the tool with a set of solved cases from the clinic."),
+        blk("table", "<table><tr><td>System</td><td>Score</td></tr></table>"),
+        blk("text", "Retrieving and synthesizing technical information is hard work."),
+    ]},
+]
+
+
+class TestAlign:
+    def test_ranges_form_a_partition_with_forward_search(self):
+        ranges, rate, confidence = convert_source.align_pages(MD, PAGES)
+        assert [(r["page"], r["line_start"], r["line_end"], r["how"]) for r in ranges] == [
+            (1, 1, 4, "aligned"), (2, 5, 10, "aligned"), (3, 11, 17, "aligned"),
+        ]
+        assert round(rate, 3) == round(6 / 7, 3) and confidence == "high"
+
+    def test_repeated_text_maps_to_the_later_occurrence(self):
+        ranges, _, _ = convert_source.align_pages(MD, PAGES)
+        assert ranges[2]["line_end"] == 17          # not pulled back to line 3
+
+    def test_page_idx_is_absolute_across_windows(self):
+        shifted = [dict(p, page_idx=p["page_idx"] + 4) for p in PAGES]
+        ranges, _, _ = convert_source.align_pages(MD, shifted)
+        assert [r["page"] for r in ranges] == [5, 6, 7]
+
+    def test_page_without_matches_is_interpolated(self):
+        pages = PAGES + [{"page_idx": 3, "blocks": [blk("image", "fig")]}]
+        ranges, _, _ = convert_source.align_pages(MD, pages)
+        last = ranges[-1]
+        assert last["how"] == "interpolated" and last["page"] == 4
+        assert 1 <= last["line_start"] <= last["line_end"] <= 17
+
+    def test_nothing_matches_gives_low_confidence(self):
+        pages = [{"page_idx": 0, "blocks": [blk("text", "completely unrelated sentence here")]}]
+        ranges, rate, confidence = convert_source.align_pages(MD, pages)
+        assert rate == 0.0 and confidence == "low" and ranges[0]["how"] == "interpolated"
+
+    def test_escapes_and_case_do_not_break_matching(self):
+        md = "Growth of 5\\*3 PERCENT was reported in the second quarter.\n"
+        pages = [{"page_idx": 0, "blocks": [blk("text", "growth of 5*3 percent was reported in the second quarter.")]}]
+        _, rate, _ = convert_source.align_pages(md, pages)
+        assert rate == 1.0
+
+
+class TestDroppedLines:
+    def test_collects_margin_blocks_once_per_page(self):
+        pages = [
+            {"page_idx": 0, "blocks": [blk("header", "Running  header"), blk("header", "Running header"),
+                                       blk("text", "body"), blk("footer", "p. 1")]},
+            {"page_idx": 1, "blocks": [blk("page_footnote", "1 https://example.org"), blk("page_number", "2")]},
+        ]
+        assert convert_source.dropped_lines(pages) == [
+            "p1\theader\tRunning header", "p1\tfooter\tp. 1",
+            "p2\tpage_footnote\t1 https://example.org", "p2\tpage_number\t2",
+        ]
+
+    def test_flat_text_handles_nested_content(self):
+        assert convert_source.flat_text([{"type": "text", "content": "a"}, {"content": ["b", "c"]}]) == "a b c"
