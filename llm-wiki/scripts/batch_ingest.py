@@ -45,7 +45,8 @@ def collect_known_hashes(wiki_root: Path) -> set[str]:
         try:
             text = stub.read_text(encoding="utf-8", errors="replace")
             for line in text.splitlines():
-                if line.strip().startswith("raw_sha256:"):
+                key = line.strip().split(":", 1)[0]
+                if key in ("raw_sha256", "source_pdf_sha256"):
                     sha = line.split(":", 1)[1].strip().strip("\"'")
                     if sha:
                         known.add(sha)
@@ -54,32 +55,14 @@ def collect_known_hashes(wiki_root: Path) -> set[str]:
     return known
 
 
-def convert_pdf(pdf_path: Path, wiki_root: Path, out_dir: Path) -> Path | None:
-    """Convert a PDF to markdown using pdf_to_md.py. Returns the output path."""
-    converter = wiki_root / ".claude" / "skills" / "pdf-ingest" / "scripts" / "pdf_to_md.py"
-    if not converter.exists():
-        print(f"  ⚠️  pdf_to_md.py not found at {converter}. Enable pdf-ingest skill.")
-        return None
-    out_dir.mkdir(parents=True, exist_ok=True)
-    result = subprocess.run(
-        [sys.executable, str(converter), str(pdf_path), "--out", str(out_dir)],
-        capture_output=True, text=True
-    )
-    if result.returncode != 0:
-        print(f"  ✗ PDF conversion failed: {pdf_path.name}")
-        print(f"    {result.stderr.strip()}")
-        return None
-    # Find the output file
-    stem = pdf_path.stem.lower()
-    for f in out_dir.glob("*.md"):
-        if stem in f.stem.lower():
-            return f
-    return None
+
 
 
 def batch_ingest(root: str, scan_dir: str = "raw", extensions: list[str] | None = None,
                  pdf_mode: bool = False, dry_run: bool = False,
-                 force: bool = False) -> int:
+                 force: bool = False, no_convert: bool = False) -> int:
+    # pdf_mode is the deprecated --pdf flag: PDFs are now always converted (by fast_ingest.py,
+    # via convert_source.py) unless no_convert is set.
     root_path = Path(root).resolve()
     scan_path = root_path / scan_dir
     fast_ingest = root_path / ".claude" / "skills" / "llm-wiki" / "scripts" / "fast_ingest.py"
@@ -109,8 +92,13 @@ def batch_ingest(root: str, scan_dir: str = "raw", extensions: list[str] | None 
 
     # Find candidate files
     candidates: list[Path] = []
+    converted_root = root_path / "raw" / "converted"
     for ext in extensions:
-        candidates.extend(sorted(scan_path.rglob(f"*{ext}")))
+        # raw/converted/ holds script-written copies of PDFs; they are ingested via their PDF
+        candidates.extend(
+            f for f in sorted(scan_path.rglob(f"*{ext}"))
+            if converted_root not in f.parents
+        )
 
     if not candidates:
         print("No files found matching the specified extensions.")
@@ -128,20 +116,17 @@ def batch_ingest(root: str, scan_dir: str = "raw", extensions: list[str] | None 
             print(f"  ↷ already ingested: {raw_file.relative_to(root_path)}")
             continue
 
-        # PDF conversion mode
+        # PDFs are converted to line-citable markdown inside fast_ingest.py (convert_source.py)
         ingest_target = raw_file
-        if pdf_mode and raw_file.suffix.lower() == ".pdf":
+        if raw_file.suffix.lower() == ".pdf":
+            if no_convert:
+                skip_count += 1
+                print(f"  ↷ PDF skipped (--no-convert): {raw_file.relative_to(root_path)}")
+                continue
             if dry_run:
-                print(f"  [DRY] would convert PDF: {raw_file.relative_to(root_path)}")
+                print(f"  [DRY] would convert PDF and ingest: {raw_file.relative_to(root_path)}")
                 new_count += 1
                 continue
-            out_dir = root_path / "raw" / "articles"
-            converted = convert_pdf(raw_file, root_path, out_dir)
-            if converted is None:
-                error_count += 1
-                continue
-            ingest_target = converted
-            print(f"  ✓ converted PDF → {converted.relative_to(root_path)}")
 
         if dry_run:
             print(f"  [DRY] would ingest: {raw_file.relative_to(root_path)}")
@@ -192,7 +177,9 @@ def main() -> None:
     parser.add_argument("--ext", nargs="+", default=[".md", ".txt"],
                         help="File extensions to include (default: .md .txt)")
     parser.add_argument("--pdf", action="store_true",
-                        help="Auto-convert PDF files before ingest")
+                        help="Deprecated no-op: PDFs are always converted unless --no-convert")
+    parser.add_argument("--no-convert", action="store_true",
+                        help="Skip PDF files instead of converting them")
     parser.add_argument("--dry-run", action="store_true",
                         help="Show what would be processed without creating stubs")
     parser.add_argument("--force", action="store_true",
@@ -206,6 +193,7 @@ def main() -> None:
         pdf_mode=args.pdf,
         dry_run=args.dry_run,
         force=args.force,
+        no_convert=args.no_convert,
     ))
 
 
