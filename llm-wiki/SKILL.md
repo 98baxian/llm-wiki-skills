@@ -95,6 +95,7 @@ then execute the scaffold script as directed there.
 │   ├── articles/
 │   ├── papers/
 │   ├── pdfs/              ← PDF source files
+│   ├── converted/         ← Script-written markdown of PDFs (line-citable; never edit)
 │   ├── notes/
 │   ├── images/
 │   ├── clippings/         ← Obsidian Web Clipper output
@@ -129,6 +130,7 @@ then execute the scaffold script as directed there.
 | Layer                        | Owner  | Rule                                                                          |
 |------------------------------|--------|-------------------------------------------------------------------------------|
 | `raw/`                       | Human  | IMMUTABLE. LLM reads only, never modifies.                                    |
+| `raw/converted/`             | Script | Written once per PDF by `convert_source.py`. The LLM never edits it. Cite this markdown, not the PDF. |
 | `<private-zone>/` (if any)   | Human  | NEVER read directly (`Read`/`cat`/etc.). Sensitive data; pipeline-only access. See `CLAUDE.md` § Private zones. |
 | `wiki/`                      | LLM    | LLM fully owns. Human browses, does not edit.                                 |
 | `wiki/hot.md`                | LLM    | Rolling recent-context cache; overwritten each session. Read FIRST at session start. See § Hot cache. |
@@ -276,6 +278,12 @@ Add one source to the knowledge base. Default: the agent reads the raw source
 vault's `CLAUDE.md` mandates a preprocess/safety step for a source type, follow that
 first. For a large source, scaffold before you summarize (§ Divide-and-conquer).
 
+**PDFs:** `fast_ingest.py` first converts a PDF into line-citable markdown under
+`raw/converted/<slug>/` (local MinerU by default, your own tool or `pdftotext` otherwise; see
+the vault `CLAUDE.md` § Document conversion) and ingests that markdown, so citations stay
+`(raw/converted/<slug>/<slug>.md, Lxx)`. `<slug>.pages.json` maps lines back to PDF pages.
+A source stub from a PDF carries `source_pdf` and `source_pdf_sha256`.
+
 ```bash
 python3 .claude/skills/llm-wiki/scripts/fast_ingest.py <wiki-root> <raw-file-path>
 ```
@@ -312,9 +320,9 @@ Default: each source is read directly, same as single `ingest`. Skips files alre
 ingested (SHA-256 match). After the script runs, fill each stub following `ingest`
 Steps 2–5, then rebuild the index once all stubs are complete.
 
-> The script also exposes a `--pdf` flag (auto-convert via a PDF skill before
-> ingest) — **off by default**. Use it only if this vault's `CLAUDE.md` calls for a
-> preprocessing step.
+> PDFs (`--ext .pdf`) are converted automatically before ingest (see `ingest`). Pass
+> `--no-convert` to skip them. The old `--pdf` flag is a deprecated no-op. Files under
+> `raw/converted/` are never scanned as separate sources.
 
 **After batch ingest — compile immediately (MANDATORY).** When you process 3+
 sources in one batch, each source will independently extract concepts. This

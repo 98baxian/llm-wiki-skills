@@ -6,7 +6,9 @@ verify-fresh specifics). This file is the complete step-by-step. Read it when yo
 
 Default ingest reads the raw source **directly** — no preprocessing skill in front of
 it — and compiles it into wiki pages. `fast_ingest.py` only does bookkeeping (hash, slug,
-stub); it does not transform the source. If the vault's `CLAUDE.md` requires a
+stub); it does not transform the source, except that a **PDF is converted first** into
+line-citable markdown under `raw/converted/<slug>/` (`convert_source.py`, configured in the vault
+`CLAUDE.md` § Document conversion) and the stub points at that markdown. If the vault's `CLAUDE.md` requires a
 preprocessing or safety step for a source type, that overrides this default — follow it
 first. For a large source, scaffold before you summarize (see § Divide-and-conquer):
 outline the sections, then distill each.

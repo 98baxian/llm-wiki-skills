@@ -199,6 +199,21 @@ Every operation appends an entry to `log/YYYYMMDD.md`.
 - Small text sources → copy into `raw/<subfolder>/`.
 - Large binaries → create `raw/refs/<slug>.md` pointer file.
 
+## Document conversion
+
+PDFs in `raw/pdfs/` are converted once, at ingest, into line-citable markdown under
+`raw/converted/<slug>/` (script-written, never edit by hand). Cite the converted markdown,
+e.g. `(raw/converted/<slug>/<slug>.md, L14-22)`; `<slug>.pages.json` translates lines back to PDF pages.
+
+converter: auto        # auto | mineru | pdftotext | command | none
+tier: basic            # MinerU tier: flash | basic | standard | advanced (standard/advanced use the GPU)
+timeout: 900           # seconds per file
+command: ""            # converter: command -> "mytool {{input}} {{outdir}}"; must write {{outdir}}/<slug>.md
+
+`auto` tries your `command`, then local MinerU (`mineru-kit`), then `pdftotext` (lossy, text-layer
+PDFs only). Set `converter: none` to turn conversion off. Documents are never uploaded: the remote
+MinerU service is not used.
+
 ## Current articles
 
 ### Concepts

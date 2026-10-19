@@ -43,8 +43,11 @@ To ingest a full directory of files:
 # Ingest all new markdown files in raw/articles/
 python3 scripts/batch_ingest.py <wiki-root> --dir raw/articles
 
-# Ingest all PDFs with auto-conversion
-python3 scripts/batch_ingest.py <wiki-root> --dir raw/pdfs --ext .pdf --pdf
+# Ingest all PDFs (converted to markdown first; --no-convert skips them)
+python3 scripts/batch_ingest.py <wiki-root> --dir raw/pdfs --ext .pdf
+
+# Convert one PDF without ingesting it (add --force to reconvert; line numbers change)
+python3 scripts/convert_source.py <wiki-root> raw/pdfs/paper.pdf
 
 # Dry run — see what would be processed without creating stubs
 python3 scripts/batch_ingest.py <wiki-root> --dir raw/ --dry-run
