@@ -433,3 +433,95 @@ class TestSeverityDowngrades:
         c = claim("zzz qqq www vvv", locs=(("L", 1, 1),))
         assert vq.verify_claim(c, ctx("a", strict=True)).severity == "error"
         assert vq.verify_claim(c, ctx("a")).severity == "warning"
+
+
+"""Incremental cache: keyed by quote + place, valid only for the same evidence."""
+import json
+from dataclasses import asdict
+
+import verify_quotes as vq
+
+
+def cache_claim(quote="the quoted passage is right here", raw="raw/a.md", locs=(("L", 1, 1),)):
+    return vq.Claim("wiki/x.md", 5, quote, vq.fragments_of(quote), raw, locs, 5)
+
+
+FP = {"raw_sha256": "r1", "pages_sha256": "", "convert_sha256": "", "dropped_sha256": "",
+      "threshold": 85, "near_miss": 60, "strict": False, "algo": "a1"}
+
+
+class TestKey:
+    def test_stable_and_sensitive_to_quote_place_and_raw(self):
+        base = vq.claim_key(cache_claim())
+        assert base == vq.claim_key(cache_claim())
+        assert base == vq.claim_key(cache_claim("the  quoted passage\nis right here"))      # whitespace is normalized
+        assert base != vq.claim_key(cache_claim("The quoted passage is right here"))         # case is not
+        assert base != vq.claim_key(cache_claim(raw="raw/b.md"))
+        assert base != vq.claim_key(cache_claim(locs=(("L", 2, 2),)))
+        assert base != vq.claim_key(cache_claim("a different quoted passage entirely"))
+
+    def test_short_id_is_eight_hex_digits(self):
+        assert len(vq.claim_id(cache_claim())) == 8 and int(vq.claim_id(cache_claim()), 16) >= 0
+
+
+class TestCache:
+    def result(self, verdict="exact"):
+        return vq.Result(verdict, "none" if verdict == "exact" else "error", 100, [3, 3], "n")
+
+    def test_hit_and_miss_on_fingerprint(self, tmp_path):
+        cache = vq.Cache(tmp_path / ".cache" / "vq.json")
+        cache.put("k", FP, "corpus1", self.result())
+        assert vq.Result(**cache.get("k", FP, "corpus1")) == self.result()
+        assert cache.get("k", dict(FP, raw_sha256="r2"), "corpus1") is None
+        assert cache.get("k", dict(FP, strict=True), "corpus1") is None
+        assert cache.get("other", FP, "corpus1") is None
+
+    def test_corpus_only_matters_for_not_found(self, tmp_path):
+        cache = vq.Cache(tmp_path / "vq.json")
+        cache.put("ok", FP, "c1", self.result("exact"))
+        cache.put("nf", FP, "c1", self.result("not_found"))
+        assert cache.get("ok", FP, "c2") is not None            # an exact verdict does not depend on other files
+        assert cache.get("nf", FP, "c2") is None                # suggested_raw may have changed
+        assert cache.get("nf", FP, "c1") is not None
+
+    def test_save_load_roundtrip_and_atomic_file(self, tmp_path):
+        path = tmp_path / ".cache" / "vq.json"
+        cache = vq.Cache(path)
+        cache.put("k", FP, "c1", self.result())
+        cache.save()
+        assert path.exists() and not list(path.parent.glob("*.tmp"))
+        again = vq.Cache(path)
+        assert again.get("k", FP, "c1") is not None
+
+    def test_corrupt_or_foreign_file_is_ignored(self, tmp_path):
+        path = tmp_path / "vq.json"
+        path.write_text("{ not json", encoding="utf-8")
+        assert vq.Cache(path).entries == {}
+        path.write_text(json.dumps({"schema": "something-else", "entries": {"k": {}}}), encoding="utf-8")
+        assert vq.Cache(path).entries == {}
+
+    def test_prune_keeps_only_seen_keys(self, tmp_path):
+        cache = vq.Cache(tmp_path / "vq.json")
+        cache.put("a", FP, "c", self.result())
+        cache.put("b", FP, "c", self.result())
+        cache.prune({"a"})
+        assert set(cache.entries) == {"a"}
+
+    def test_disabled_cache_never_hits_or_writes(self, tmp_path):
+        cache = vq.Cache(None)
+        cache.put("k", FP, "c", self.result())
+        assert cache.get("k", FP, "c") is None
+        cache.save()                                          # no path: nothing happens, no error
+
+
+def test_algo_hash_is_stable_and_short():
+    assert vq.algo_hash() == vq.algo_hash() and len(vq.algo_hash()) == 16
+
+
+def test_corpus_token_changes_when_raw_files_change(tmp_path):
+    (tmp_path / "raw").mkdir()
+    (tmp_path / "raw" / "a.md").write_text("one", encoding="utf-8")
+    first = vq.corpus_token(tmp_path)
+    assert first == vq.corpus_token(tmp_path)
+    (tmp_path / "raw" / "b.txt").write_text("two", encoding="utf-8")
+    assert vq.corpus_token(tmp_path) != first

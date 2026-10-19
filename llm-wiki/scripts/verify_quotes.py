@@ -543,3 +543,97 @@ def verify_claim(claim: Claim, ctx: Context) -> Result:
     else:
         result = _not_found(claim, ctx, best)
     return _apply_severity(result, claim, ctx)
+
+
+CACHE_SCHEMA = "llm-wiki.verify-quotes-cache/1"
+RAW_SUFFIXES = {".md", ".txt"}
+
+
+def format_locs(locs: tuple) -> str:
+    parts = []
+    for loc in locs:
+        if loc[0] == "L":
+            parts.append(f"L{loc[1]}" if loc[1] == loc[2] else f"L{loc[1]}-{loc[2]}")
+        elif loc[0] == "p":
+            parts.append(f"p.{loc[1]}" if loc[1] == loc[2] else f"p.{loc[1]}-{loc[2]}")
+        else:
+            parts.append("location unknown")
+    return ", ".join(parts)
+
+
+def claim_key(claim: Claim) -> str:
+    """Identity of a quote at a place: normalized quote, cited file and locations."""
+    material = "|".join([textnorm.normalize(claim.quote), claim.raw, format_locs(claim.locs)])
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def claim_id(claim: Claim) -> str:
+    return claim_key(claim)[:8]
+
+
+def algo_hash() -> str:
+    """Fingerprint of the code that decides verdicts: a cache entry made by other code is stale."""
+    here = Path(__file__).resolve().parent
+    h = hashlib.sha256()
+    for name in ("verify_quotes.py", "textnorm.py", "citations.py"):
+        h.update((here / name).read_bytes())
+    return h.hexdigest()[:16]
+
+
+def corpus_token(root: Path) -> str:
+    """Changes whenever any raw .md/.txt file is added, removed or modified."""
+    h = hashlib.sha256()
+    raw = Path(root) / "raw"
+    if raw.is_dir():
+        for f in sorted(raw.rglob("*")):
+            if f.is_file() and f.suffix.lower() in RAW_SUFFIXES:
+                st = f.stat()
+                h.update(f"{f.relative_to(root).as_posix()}|{st.st_size}|{st.st_mtime_ns}\n".encode())
+    return h.hexdigest()[:16]
+
+
+class Cache:
+    """Verdicts keyed by quote + place. An entry is reused only for the same evidence:
+    raw content, page map, conversion record, threshold, strictness and verdict code.
+    A ``not_found`` entry also depends on the other raw files (they may hold the quote)."""
+
+    def __init__(self, path: Path | None):
+        self.path = Path(path) if path else None
+        self.entries: dict = {}
+        if self.path and self.path.exists():
+            try:
+                data = json.loads(self.path.read_text(encoding="utf-8"))
+                if data.get("schema") == CACHE_SCHEMA and isinstance(data.get("entries"), dict):
+                    self.entries = data["entries"]
+            except (OSError, ValueError, AttributeError):
+                self.entries = {}
+
+    def get(self, key: str, fingerprint: dict, corpus: str) -> dict | None:
+        if self.path is None:
+            return None
+        entry = self.entries.get(key)
+        if not entry or entry.get("fp") != fingerprint:
+            return None
+        if entry.get("corpus") is not None and entry["corpus"] != corpus:
+            return None
+        return entry["result"]
+
+    def put(self, key: str, fingerprint: dict, corpus: str, result: Result) -> None:
+        if self.path is None:
+            return
+        self.entries[key] = {
+            "fp": fingerprint,
+            "corpus": corpus if result.verdict == "not_found" else None,
+            "result": asdict(result),
+        }
+
+    def prune(self, keep: set) -> None:
+        self.entries = {k: v for k, v in self.entries.items() if k in keep}
+
+    def save(self) -> None:
+        if self.path is None:
+            return
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.path.with_suffix(self.path.suffix + f".{os.getpid()}.tmp")
+        tmp.write_text(json.dumps({"schema": CACHE_SCHEMA, "entries": self.entries}, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, self.path)
