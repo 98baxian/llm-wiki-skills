@@ -228,3 +228,159 @@ def extract_claims(text: str, page: str) -> ExtractResult:
         c.shared = groups[(c.cite_line, c.raw, c.locs)] - 1
     res.claims = bound
     return res
+
+
+MIN_FUZZY_CHARS = 6
+SCAN_LIMIT = 4000          # ranges up to this many normalized characters are scanned directly
+MAX_POSTINGS = 3000        # trigrams more frequent than this carry no signal
+TOP_CANDIDATES = 5
+RUNGS = ("literal", "fold", "loose")
+
+
+class Doc:
+    """A raw text plus lazily built normalized views that map back to line numbers."""
+
+    def __init__(self, text: str):
+        self.text = text
+        self.line_starts = [0] + [m.end() for m in re.finditer("\n", text)]
+        self.n_lines = len(self.line_starts) - (1 if text.endswith("\n") or not text else 0)
+        self._views: dict = {}
+        self._trigrams = None
+        self._cjk_share = None
+
+    def view(self, mode: str, join_hyphen: bool = True) -> tuple[str, list[int]]:
+        key = (mode, join_hyphen)
+        if key not in self._views:
+            self._views[key] = textnorm.normalize_with_map(
+                self.text, fold=(mode == "fold"), loose_mode=(mode == "loose"), join_hyphen=join_hyphen)
+        return self._views[key]
+
+    def has_hyphen_break(self) -> bool:
+        return bool(textnorm.HYPHEN_BREAK.search(self.text))
+
+    def line_of(self, offset: int) -> int:
+        return bisect.bisect_right(self.line_starts, offset)
+
+    def offsets_for_lines(self, first: int, last: int) -> tuple[int, int]:
+        first = max(1, first)
+        last = min(last, max(self.n_lines, 1))
+        lo = self.line_starts[first - 1] if first - 1 < len(self.line_starts) else len(self.text)
+        hi = self.line_starts[last] if last < len(self.line_starts) else len(self.text)
+        return lo, hi
+
+    def find(self, needle: str, mode: str, line_range: tuple[int, int], after: int = 0,
+             join_hyphen: bool = True) -> tuple[int, int] | None:
+        """Span ``(start, end)`` in the normalized view, searching only ``line_range`` from ``after``."""
+        text, offs = self.view(mode, join_hyphen)
+        lo, hi = self.offsets_for_lines(*line_range)
+        lo_n = bisect.bisect_left(offs, lo)
+        hi_n = bisect.bisect_left(offs, hi)
+        j = text.find(needle, max(lo_n, after), hi_n)
+        return None if j < 0 else (j, j + len(needle))
+
+    def lines_of_span(self, mode: str, span: tuple[int, int], join_hyphen: bool = True) -> tuple[int, int]:
+        _, offs = self.view(mode, join_hyphen)
+        return self.line_of(offs[span[0]]), self.line_of(offs[span[1] - 1])
+
+    def trigram_index(self) -> dict:
+        if self._trigrams is None:
+            text, _ = self.view("loose")
+            index: dict = defaultdict(list)
+            for i in range(len(text) - 2):
+                index[text[i:i + 3]].append(i)
+            self._trigrams = index
+        return self._trigrams
+
+    @property
+    def cjk_share(self) -> float:
+        if self._cjk_share is None:
+            letters = [c for c in self.text if c.isalpha()]
+            self._cjk_share = sum(1 for c in letters if is_cjk(c)) / len(letters) if letters else 0.0
+        return self._cjk_share
+
+
+def needle_for(mode: str, fragment: str) -> str:
+    if mode == "literal":
+        return textnorm.normalize(fragment)
+    if mode == "fold":
+        return textnorm.fold_case(fragment)
+    return textnorm.loose(fragment)
+
+
+def match_fragments(doc: Doc, fragments: list[str], mode: str, ranges: list[tuple[int, int]]) -> tuple[int, int] | None:
+    """All fragments, in order, inside one of ``ranges`` (line ranges). Returns the matched lines."""
+    needles = [needle_for(mode, f) for f in fragments]
+    if not needles or not all(needles):
+        return None
+    joins = (True, False) if mode != "loose" and doc.has_hyphen_break() else (True,)
+    for rng in ranges:
+        for join in joins:
+            cursor, first, last, ok = 0, None, None, True
+            for needle in needles:
+                span = doc.find(needle, mode, rng, after=cursor, join_hyphen=join)
+                if span is None:
+                    ok = False
+                    break
+                cursor = span[1]
+                a, b = doc.lines_of_span(mode, span, join)
+                first = a if first is None else first
+                last = b
+            if ok:
+                return first, last
+    return None
+
+
+def partial_match(query: str, window: str) -> tuple[int, tuple[int, int] | None]:
+    """Percentage of ``query`` characters found, in order, inside ``window``, and where.
+
+    The span runs from the first to the last solid matching block (3+ characters), so
+    stray one-letter coincidences do not stretch it.
+    """
+    sm = difflib.SequenceMatcher(None, query, window, autojunk=False)
+    blocks = [b for b in sm.get_matching_blocks() if b.size]
+    score = int(100 * sum(b.size for b in blocks) / len(query))
+    solid = [b for b in blocks if b.size >= 3] or blocks
+    if not solid:
+        return score, None
+    return score, (min(b.b for b in solid), max(b.b + b.size for b in solid) - 1)
+
+
+def fuzzy_best(doc: Doc, fragment: str, line_range: tuple[int, int]) -> tuple[int, tuple[int, int] | None, int]:
+    """Best fuzzy score of ``fragment`` inside ``line_range``: ``(score, (first_line, last_line), position)``.
+
+    ``position`` is the index of the match in the loose view (-1 when nothing matched); callers use
+    it to check that ellipsis fragments appear in order.
+
+    Small ranges are scanned; large ones first rank windows by character-trigram overlap
+    (an inverted index built once per raw file) and only the top candidates are scored.
+    """
+    query = textnorm.loose(fragment)
+    n = len(query)
+    if n < MIN_FUZZY_CHARS:
+        return 0, None, -1
+    text, offs = doc.view("loose")
+    lo, hi = doc.offsets_for_lines(*line_range)
+    lo_n = bisect.bisect_left(offs, lo)
+    hi_n = bisect.bisect_left(offs, hi)
+    if hi_n - lo_n <= SCAN_LIMIT:
+        starts = list(range(lo_n, max(lo_n, hi_n - n) + 1, max(1, n // 4)))
+    else:
+        index = doc.trigram_index()
+        step = max(1, n // 2)
+        votes: Counter = Counter()
+        for gram in {query[i:i + 3] for i in range(n - 2)}:
+            positions = index.get(gram)
+            if not positions or len(positions) > MAX_POSTINGS:
+                continue
+            for p in positions[bisect.bisect_left(positions, lo_n):bisect.bisect_right(positions, hi_n)]:
+                votes[p // step] += 1
+        starts = sorted({max(lo_n, b * step - n // 4) for b, _ in votes.most_common(TOP_CANDIDATES)})
+    best, best_span = 0, None
+    width = int(n * 1.3) + 1
+    for s in starts:
+        score, rel = partial_match(query, text[s:min(s + width, hi_n)])
+        if score > best and rel is not None:
+            best, best_span = score, (s + rel[0], s + rel[1])
+    if best_span is None:
+        return 0, None, -1
+    return best, (doc.line_of(offs[best_span[0]]), doc.line_of(offs[best_span[1]])), best_span[0]
