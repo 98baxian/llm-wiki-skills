@@ -525,3 +525,189 @@ def test_corpus_token_changes_when_raw_files_change(tmp_path):
     assert first == vq.corpus_token(tmp_path)
     (tmp_path / "raw" / "b.txt").write_text("two", encoding="utf-8")
     assert vq.corpus_token(tmp_path) != first
+
+
+"""verify_wiki, the JSON report, and the CLI."""
+import hashlib
+import json
+
+import pytest
+
+import verify_quotes as vq
+
+
+def make_vault(tmp_path, pages=None, raw=None, claude="# Wiki\n"):
+    (tmp_path / "wiki").mkdir(exist_ok=True)
+    (tmp_path / "CLAUDE.md").write_text(claude, encoding="utf-8")
+    for rel, text in (pages or {}).items():
+        f = tmp_path / "wiki" / rel
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(text, encoding="utf-8")
+    for rel, text in (raw or {}).items():
+        f = tmp_path / rel
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(text, encoding="utf-8")
+    return tmp_path
+
+
+def tree_hash(root):
+    h = hashlib.sha256()
+    for f in sorted(p for p in root.rglob("*") if p.is_file() and ".cache" not in p.parts and "outputs" not in p.parts):
+        h.update(f.relative_to(root).as_posix().encode())
+        h.update(f.read_bytes())
+    return h.hexdigest()
+
+
+RAW = "line one\nthe quoted passage is right here\nline three\n"
+PAGE_OK = 'A claim: "the quoted passage is right here" (raw/articles/a.md, L2)\n'
+PAGE_BAD = 'A claim: "an entirely invented sentence about nothing" (raw/articles/a.md, L2)\n'
+
+
+class TestVerifyWiki:
+    def test_exact_quote_gives_a_clean_report(self, tmp_path):
+        root = make_vault(tmp_path, {"concepts/x.md": PAGE_OK}, {"raw/articles/a.md": RAW})
+        report = vq.verify_wiki(root, use_cache=False)
+        assert report["schema"] == "llm-wiki.verify-quotes/1" and report["pages_checked"] == 1
+        assert report["counts"]["exact"] == 1 and report["errors"] == 0
+        r = report["results"][0]
+        assert (r["page"], r["line"], r["raw"], r["loc"], r["verdict"], r["severity"]) == (
+            "wiki/concepts/x.md", 1, "raw/articles/a.md", "L2", "exact", "none")
+        assert r["matched_lines"] == [2, 2] and r["quote"] == "the quoted passage is right here"
+        assert len(r["id"]) == 8
+
+    def test_fabricated_quote_is_an_error(self, tmp_path):
+        root = make_vault(tmp_path, {"concepts/x.md": PAGE_BAD}, {"raw/articles/a.md": RAW})
+        report = vq.verify_wiki(root, use_cache=False)
+        assert report["counts"]["not_found_error"] == 1 and report["errors"] == 1
+
+    def test_only_content_folders_are_scanned_and_conflict_copies_skipped(self, tmp_path):
+        root = make_vault(tmp_path, {
+            "concepts/x.md": PAGE_OK,
+            "concepts/x.sync-conflict-20260101-ABC.md": PAGE_BAD,
+            "templates/t.md": PAGE_BAD,
+            "index.md": PAGE_BAD,
+        }, {"raw/articles/a.md": RAW})
+        report = vq.verify_wiki(root, use_cache=False)
+        assert report["pages_checked"] == 1 and report["errors"] == 0
+
+    def test_pages_argument_restricts_the_run(self, tmp_path):
+        root = make_vault(tmp_path, {"concepts/x.md": PAGE_OK, "concepts/y.md": PAGE_BAD}, {"raw/articles/a.md": RAW})
+        report = vq.verify_wiki(root, pages=["wiki/concepts/x.md"], use_cache=False)
+        assert report["pages_checked"] == 1 and report["errors"] == 0
+        with pytest.raises(vq.UsageError):
+            vq.verify_wiki(root, pages=["wiki/concepts/missing.md"], use_cache=False)
+
+    def test_missing_pdf_and_private_raw_are_unverifiable(self, tmp_path):
+        page = (
+            'Gone: "a quote whose file is gone" (raw/articles/gone.md, L1)\n'
+            'Pdf: "a quote cited to a pdf file" (raw/pdfs/p.pdf, L1)\n'
+            'Secret: "a quote inside the private zone" (raw/secret/s.md, L1)\n'
+        )
+        claude = "# Wiki\n\n## Private zones\n\n- `raw/secret/`\n"
+        root = make_vault(tmp_path, {"concepts/x.md": page}, {"raw/secret/s.md": "a quote inside the private zone\n"}, claude)
+        (root / "raw" / "pdfs").mkdir()
+        (root / "raw" / "pdfs" / "p.pdf").write_bytes(b"%PDF")
+        report = vq.verify_wiki(root, use_cache=False)
+        assert report["counts"]["unverifiable_infrastructure"] == 3 and report["errors"] == 0
+        notes = " | ".join(r["note"] for r in report["results"])
+        assert "missing" in notes and "PDF" in notes and "private zone" in notes
+        assert report["missing_raw_files"] == [{"raw": "raw/articles/gone.md", "citations": 1}]
+
+    def test_uncited_and_malformed_are_counted(self, tmp_path):
+        page = 'No cite: "a quote with no citation at all"\n\nBroken (raw/articles/oops\n'
+        root = make_vault(tmp_path, {"concepts/x.md": page}, {})
+        report = vq.verify_wiki(root, use_cache=False)
+        assert report["counts"]["uncited"] == 1 and report["counts"]["malformed_citations"] == 1
+        assert report["malformed"][0]["fragment"].startswith("(raw/articles/oops")
+
+    def test_wrong_location_and_suggested_raw(self, tmp_path):
+        raw = {"raw/articles/a.md": "x\n" * 30 + "the quoted passage is right here\n",
+               "raw/articles/b.md": "an entirely invented sentence about nothing\n"}
+        page = PAGE_OK + PAGE_BAD
+        root = make_vault(tmp_path, {"concepts/x.md": page}, raw)
+        report = vq.verify_wiki(root, use_cache=False)
+        by_quote = {r["quote"]: r for r in report["results"]}
+        assert by_quote["the quoted passage is right here"]["verdict"] == "wrong_location"
+        bad = by_quote["an entirely invented sentence about nothing"]
+        assert bad["verdict"] == "not_found" and bad["suggested_raw"] == "raw/articles/b.md"
+
+    def test_lossy_conversion_downgrades_and_strict_restores(self, tmp_path):
+        raw = {"raw/converted/doc/doc.md": "something else entirely\n",
+               "raw/converted/doc/doc.convert.json": json.dumps({"lossy": True})}
+        page = 'Q: "an entirely invented sentence about nothing" (raw/converted/doc/doc.md, L1)\n'
+        root = make_vault(tmp_path, {"concepts/x.md": page}, raw)
+        soft = vq.verify_wiki(root, use_cache=False)
+        assert soft["counts"]["not_found_warning"] == 1 and soft["errors"] == 0
+        strict = vq.verify_wiki(root, use_cache=False, strict=True)
+        assert strict["counts"]["not_found_error"] == 1 and strict["errors"] == 1
+
+    def test_page_citation_uses_pages_json(self, tmp_path):
+        pages = {"confidence": "high", "pages": [
+            {"page": 1, "line_start": 1, "line_end": 40, "how": "aligned"},
+            {"page": 2, "line_start": 41, "line_end": 80, "how": "aligned"}]}
+        raw = {"raw/converted/doc/doc.md": "x\n" * 60 + "the quoted passage is right here\n",
+               "raw/converted/doc/doc.pages.json": json.dumps(pages)}
+        page = 'Q: "the quoted passage is right here" (raw/converted/doc/doc.md, p.2)\n'
+        root = make_vault(tmp_path, {"concepts/x.md": page}, raw)
+        report = vq.verify_wiki(root, use_cache=False)
+        assert report["counts"]["exact"] == 1
+
+
+class TestCacheIntegration:
+    def test_second_run_is_served_from_the_cache_until_the_raw_changes(self, tmp_path):
+        root = make_vault(tmp_path, {"concepts/x.md": PAGE_OK}, {"raw/articles/a.md": RAW})
+        first = vq.verify_wiki(root)
+        assert first["counts"]["from_cache"] == 0 and (root / ".cache" / "verify_quotes.json").exists()
+        second = vq.verify_wiki(root)
+        assert second["counts"]["from_cache"] == 1 and second["counts"]["exact"] == 1
+        (root / "raw" / "articles" / "a.md").write_text("changed completely\n", encoding="utf-8")
+        third = vq.verify_wiki(root)
+        assert third["counts"]["from_cache"] == 0 and third["errors"] == 1
+
+    def test_threshold_change_invalidates(self, tmp_path):
+        root = make_vault(tmp_path, {"concepts/x.md": PAGE_OK}, {"raw/articles/a.md": RAW})
+        vq.verify_wiki(root, threshold=85)
+        assert vq.verify_wiki(root, threshold=90)["counts"]["from_cache"] == 0
+
+    def test_no_cache_option_writes_nothing(self, tmp_path):
+        root = make_vault(tmp_path, {"concepts/x.md": PAGE_OK}, {"raw/articles/a.md": RAW})
+        vq.verify_wiki(root, use_cache=False)
+        assert not (root / ".cache").exists()
+
+
+class TestCli:
+    def test_clean_run_exits_0_and_writes_the_report_without_touching_the_vault(self, tmp_path, capsys):
+        root = make_vault(tmp_path, {"concepts/x.md": PAGE_OK}, {"raw/articles/a.md": RAW})
+        before = tree_hash(root)
+        assert vq.main([str(root)]) == 0
+        out = capsys.readouterr().out
+        assert "exact 1" in out and "Report:" in out
+        reports = list((root / "outputs").glob("verify-quotes-*.json"))
+        assert len(reports) == 1 and json.loads(reports[0].read_text())["counts"]["exact"] == 1
+        assert tree_hash(root) == before
+
+    def test_fabricated_quote_exits_1_and_is_listed(self, tmp_path, capsys):
+        root = make_vault(tmp_path, {"concepts/x.md": PAGE_BAD}, {"raw/articles/a.md": RAW})
+        before = tree_hash(root)
+        assert vq.main([str(root), "--no-cache"]) == 1
+        assert "wiki/concepts/x.md:1" in capsys.readouterr().out
+        assert tree_hash(root) == before
+
+    def test_warnings_only_exit_0(self, tmp_path):
+        raw = {"raw/articles/a.md": "x\n" * 30 + "the quoted passage is right here\n"}
+        root = make_vault(tmp_path, {"concepts/x.md": PAGE_OK}, raw)
+        assert vq.main([str(root), "--no-cache"]) == 0
+
+    def test_usage_errors_exit_2(self, tmp_path, capsys):
+        assert vq.main([str(tmp_path / "nope")]) == 2
+        root = make_vault(tmp_path, {"concepts/x.md": PAGE_OK}, {"raw/articles/a.md": RAW})
+        assert vq.main([str(root), "--page", "wiki/concepts/missing.md"]) == 2
+        with pytest.raises(SystemExit) as exc:
+            vq.main([str(root), "--threshold", "abc"])
+        assert exc.value.code == 2
+
+    def test_report_path_page_and_threshold_options(self, tmp_path):
+        root = make_vault(tmp_path, {"concepts/x.md": PAGE_OK, "concepts/y.md": PAGE_BAD}, {"raw/articles/a.md": RAW})
+        target = tmp_path / "custom" / "r.json"
+        assert vq.main([str(root), "--page", "wiki/concepts/x.md", "--report", str(target), "--no-cache"]) == 0
+        assert json.loads(target.read_text())["pages_checked"] == 1
