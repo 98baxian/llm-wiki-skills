@@ -403,7 +403,8 @@ detail are in `references/ops/op-query.md`.**
 python3 .claude/skills/llm-wiki/scripts/lint_wiki.py <wiki-root>   # 13+ checks → outputs/lint-YYYY-MM-DD.md
 ```
 Flags: `--stale-only` (fast; used at session start), `--structural` (skip the
-uncited-claims check on large wikis). After running, show the error / warning / suggestion
+uncited-claims check on large wikis), `--verify-quotes` (also check that quoted passages occur
+in the raw files they cite; see `references/ops/op-verify-quotes.md`). After running, show the error / warning / suggestion
 counts, then act on the findings:
 
 - `ERROR: sha256` (raw source changed) → `cascade_flag.py <wiki-root>` writes
@@ -493,6 +494,8 @@ lint checks 9 and 14 enforce this.
 Never paraphrase numeric data.
 - WRONG: "The model has approximately 175 billion parameters."
 - RIGHT: The model has "175 billion parameters" (raw/articles/gpt3.md, L8).
+Keep each quotation on one line, with its citation after it: `verify_quotes.py` checks quoted
+passages against the cited raw lines and an unfinished or wrapped quotation is not checked.
 
 **Rule 3 — Label All Synthesis**
 Cross-source inferences: prefix with `[synthesis]`. No line citation needed.
