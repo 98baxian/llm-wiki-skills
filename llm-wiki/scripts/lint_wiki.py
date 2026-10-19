@@ -36,6 +36,7 @@ Exit codes:
 import re
 import sys
 import hashlib
+import json
 import datetime
 import argparse
 from pathlib import Path
@@ -281,6 +282,41 @@ def check_sha256(wiki_dir: Path, root: Path) -> list[str]:
                       f"WARNING SOURCE MODIFIED: {raw_file} — re-ingest required")
             modified.append(raw_file)
     return modified
+
+
+# ── Check 5b: Converted PDFs ──────────────────────────────────────────────────
+
+def check_conversion_state(wiki_dir: Path, root: Path) -> None:
+    """Source stubs that were ingested from a PDF (``source_pdf`` in frontmatter):
+    warn when the PDF changed or vanished since conversion, and note lossy or
+    low-confidence conversions."""
+    src_dir = wiki_dir / "sources"
+    if not src_dir.exists():
+        return
+    for f in sorted(src_dir.glob("*.md")):
+        fm, _ = parse_frontmatter(f)
+        pdf_rel = fm.get("source_pdf", "")
+        if not pdf_rel:
+            continue
+        rel = f.relative_to(root)
+        pdf_path = root / pdf_rel
+        if not pdf_path.exists():
+            log_issue("WARNING", "sha256", f"{rel} — source_pdf '{pdf_rel}' not found")
+        elif fm.get("source_pdf_sha256") and sha256_file(pdf_path) != fm["source_pdf_sha256"]:
+            log_issue("WARNING", "sha256",
+                      f"{rel} — converted copy is stale: {pdf_rel} changed since conversion; "
+                      f"re-run: python3 scripts/convert_source.py {root} {pdf_rel} --force")
+        if fm.get("source_lossy", "").lower() == "true":
+            log_issue("INFO", "conversion", f"{rel} — cited raw is a lossy conversion (pdftotext)")
+        raw_file = fm.get("raw_file", "")
+        pages_json = (root / raw_file).with_suffix(".pages.json") if raw_file else None
+        if pages_json and pages_json.exists():
+            try:
+                confidence = json.loads(pages_json.read_text(encoding="utf-8")).get("confidence")
+            except (OSError, ValueError):
+                confidence = None
+            if confidence == "low":
+                log_issue("INFO", "conversion", f"{rel} — page translation unreliable for {raw_file}")
 
 
 # ── Check 6: Stale Pages ─────────────────────────────────────────────────────
@@ -632,6 +668,7 @@ def lint(root: str, structural: bool = False) -> int:
     check_index(wiki_path, root_path)
     check_stubs(wiki_path, root_path)
     modified_sources = check_sha256(wiki_path, root_path)
+    check_conversion_state(wiki_path, root_path)
     check_stale(wiki_path, root_path, thresholds)
     check_orphans(wiki_path, root_path)
     check_near_duplicates(wiki_path)
