@@ -91,8 +91,13 @@ raw/converted/<slug>/
   <slug>.md              images are files, links are relative: ![](images/fig-001.png)
   <slug>.pages.json      page → line range (below)
   <slug>.convert.json    provenance
+  <slug>.dropped.txt     text of header/footer/page-number blocks the markdown omits (MinerU only)
   images/
 ```
+
+`dropped.txt` is one block per line prefixed `p<N>\t<type>\t`, de-duplicated per page. It is
+never cited as a line source; it exists so Spec B can still find DOIs, preprint ids and running
+titles that sit in page margins.
 
 Citation format is unchanged: `(raw/converted/<slug>/<slug>.md, L14-22)`.
 
@@ -208,8 +213,9 @@ verification.
 - Raw file for a PDF source = `raw/converted/<slug>/<slug>.md` (line-citable, images externalised).
 - `convert.json.lossy` and `pages.json.confidence` are available so Spec B can downgrade verdicts.
 - `normalize_for_match` is the single normalizer.
-- Known limits Spec B must state: headers/footers (DOI, preprint id, page numbers) are absent from
-  the markdown, so quotes of them cannot be verified; reconversion changes line numbers.
+- `dropped.txt` as a secondary search target, so margin text (DOI, preprint id) is not a false
+  `not_found`.
+- Known limit Spec B must state: reconversion changes line numbers.
 
 ## 12. Files touched
 
