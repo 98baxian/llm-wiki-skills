@@ -138,6 +138,34 @@ def extract_metadata(raw_file: str) -> dict:
     return meta
 
 
+def _convert_pdf_source(root: str, pdf_abs: str) -> tuple[str, str]:
+    """Convert a PDF with convert_source before ingesting it.
+
+    Returns ``(path of the markdown to ingest, extra frontmatter lines)``. With
+    ``converter: none`` the PDF is ingested unchanged, as before.
+    """
+    import convert_source
+
+    try:
+        cfg = convert_source.load_config(root)
+        if cfg.converter == "none":
+            print("ℹ  converter: none — ingesting the PDF without conversion (no line citations)")
+            return pdf_abs, ""
+        res = convert_source.convert(pdf_abs, root, config=cfg)
+    except convert_source.ConvertError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(e.code)
+    state = "reused" if res.skipped else f"converted with {res.converter}"
+    print(f"✓ PDF {state}: {os.path.relpath(res.md_path, root)}" + (" (lossy)" if res.lossy else ""))
+    frontmatter = (
+        f'source_pdf: "{os.path.relpath(pdf_abs, root)}"\n'
+        f'source_pdf_sha256: "{res.source_pdf_sha256}"\n'
+    )
+    if res.lossy:
+        frontmatter += "source_lossy: true\n"
+    return str(res.md_path), frontmatter
+
+
 def fast_ingest(root: str, raw_file_path: str) -> None:
     """Run the deterministic ingest preprocessing."""
     root = os.path.abspath(root)
@@ -153,6 +181,11 @@ def fast_ingest(root: str, raw_file_path: str) -> None:
     if not os.path.exists(raw_abs):
         print(f"ERROR: File not found: {raw_abs}", file=sys.stderr)
         sys.exit(1)
+
+    # ── Step 0: a PDF is converted to line-citable markdown first ─────────────
+    pdf_fm = ""
+    if raw_abs.lower().endswith(".pdf"):
+        raw_abs, pdf_fm = _convert_pdf_source(root, raw_abs)
 
     raw_rel = os.path.relpath(raw_abs, root)
 
@@ -221,7 +254,7 @@ confidence_at_writing: medium
 superseded_by: ""
 raw_file: "{raw_rel}"
 raw_sha256: "{sha256}"
-last_verified: {today}
+{pdf_fm}last_verified: {today}
 tags: [wiki, wiki/source]
 processed: true
 ---
@@ -254,7 +287,7 @@ tags: [wiki, wiki/source]
 processed: true
 raw_file: "{raw_rel}"
 raw_sha256: "{sha256}"
-last_verified: {today}
+{pdf_fm}last_verified: {today}
 possibly_outdated: {str(possibly_outdated).lower()}
 language: "English"
 canonical_source: ""
