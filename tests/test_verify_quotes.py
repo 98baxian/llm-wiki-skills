@@ -275,7 +275,8 @@ class TestWindows:
             {"page": 1, "line_start": 1, "line_end": 40}, {"page": 2, "line_start": 41, "line_end": 80}]}
         c = claim("x", locs=(("p", 2, 2),))
         assert vq.windows_for(c, ctx("a", pages=pages)) == [(41 - vq.SLACK, 80 + vq.SLACK)]
-        assert vq.windows_for(claim("x", locs=(("p", 9, 9),)), ctx("a", pages=pages)) is None
+        # a page absent from an existing map: no cited place at all (empty, not None)
+        assert vq.windows_for(claim("x", locs=(("p", 9, 9),)), ctx("a", pages=pages)) == []
 
 
 class TestLadder:
@@ -318,6 +319,28 @@ class TestLadder:
         bad = claim("delta epsilon ... alpha beta", fragments=["delta epsilon", "alpha beta"])
         assert vq.verify_claim(ok, d).verdict == "exact"
         assert vq.verify_claim(bad, d).verdict == "not_found"
+
+    def test_page_missing_from_the_page_map_hit_is_wrong_location(self):
+        pages = {"confidence": "high", "pages": [{"page": 1, "line_start": 1, "line_end": 3}]}
+        c = claim("The Cell divides rapidly", locs=(("p", 9, 9),))
+        r = vq.verify_claim(c, ctx(*self.D, pages=pages))
+        assert (r.verdict, r.severity, r.matched_lines) == ("wrong_location", "warning", [2, 2])
+        assert "page not in page map" in r.note
+
+    def test_page_missing_from_the_page_map_fuzzy_hit_is_wrong_location(self):
+        pages = {"confidence": "high", "pages": [{"page": 1, "line_start": 1, "line_end": 3}]}
+        c = claim("The Cell divides rapidly in cultures", locs=(("p", 9, 9),))
+        r = vq.verify_claim(c, ctx(*self.D, pages=pages))
+        assert r.verdict == "wrong_location" and "page not in page map" in r.note
+
+    def test_page_missing_from_the_page_map_miss_stays_not_found(self):
+        pages = {"confidence": "high", "pages": [{"page": 1, "line_start": 1, "line_end": 3}]}
+        c = claim("completely absent quoted passage here", locs=(("p", 9, 9),))
+        assert vq.verify_claim(c, ctx(*self.D, pages=pages)).verdict == "not_found"
+
+    def test_page_citation_without_a_page_map_keeps_the_whole_file_as_cited_place(self):
+        c = claim("The Cell divides rapidly", locs=(("p", 9, 9),))
+        assert vq.verify_claim(c, ctx(*self.D)).verdict == "exact"
 
     def test_several_locations_any_may_hold_the_quote(self):
         lines = ["x"] * 60 + ["the quoted passage is right here"]

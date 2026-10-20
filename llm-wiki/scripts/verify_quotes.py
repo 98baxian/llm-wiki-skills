@@ -433,20 +433,28 @@ def page_lines(pages_meta: dict, first_page: int, last_page: int) -> tuple[int, 
 
 
 def windows_for(claim: Claim, ctx: Context) -> list[tuple[int, int]] | None:
-    """Line ranges to search first, with SLACK. None means the whole file is the cited place."""
+    """Line ranges to search first, with SLACK. None means the whole file is the cited place.
+
+    An empty list means the citation names pages that an existing page map does not contain:
+    there is no cited place, so the whole file only counts as somewhere else.
+    """
     ranges = []
+    missing = False
     for loc in claim.locs:
         if loc[0] == "L":
             first, last = loc[1], loc[2]
         elif loc[0] == "p" and ctx.pages and ctx.pages.get("pages"):
             span = page_lines(ctx.pages, loc[1], loc[2])
             if span is None:
-                return None
+                missing = True
+                continue
             first, last = span
         else:
             return None
         ranges.append((max(1, first - SLACK), last + SLACK))
-    return ranges or None
+    if ranges:
+        return ranges
+    return [] if missing else None
 
 
 def scripts_cannot_overlap(quote: str, raw_cjk_share: float) -> bool:
@@ -521,6 +529,8 @@ def verify_claim(claim: Claim, ctx: Context) -> Result:
     whole = [(1, max(doc.n_lines, 1))]
     short = is_short(claim.quote)
     scopes = ([("cited", windows)] if windows else []) + [("file", whole)]
+    no_page = windows == []      # cited page absent from the page map: nothing counts as the cited place
+    where_note = "page not in page map; found elsewhere in the file" if no_page else "found outside the cited lines"
     for scope, ranges in scopes:
         in_cited_place = scope == "cited" or windows is None
         for rung in RUNGS:
@@ -530,7 +540,7 @@ def verify_claim(claim: Claim, ctx: Context) -> Result:
             where = list(lines)
             if not in_cited_place:
                 return Result("wrong_location", "warning", 100, where,
-                              f"found outside the cited lines ({rung})")
+                              f"{where_note} ({rung})")
             if rung == "literal":
                 return Result("exact", "none", 100, where)
             if rung == "fold":
@@ -547,18 +557,22 @@ def verify_claim(claim: Claim, ctx: Context) -> Result:
                     break
             if lines:
                 if not in_cited_place:
-                    return Result("wrong_location", "warning", 100, list(lines), "found outside the cited lines (script-folded)")
+                    return Result("wrong_location", "warning", 100, list(lines), f"{where_note} (script-folded)")
                 return Result("exact", "none", 100, list(lines), "script-folded")
     if ctx.dropped is not None:
         margin = [(1, max(ctx.dropped.n_lines, 1))]
         if any(match_fragments(ctx.dropped, frags, rung, margin) for rung in RUNGS):
             return Result("exact", "none", 100, [], "page margin")
-    cited_score, cited_lines = _fuzzy_over(doc, frags, windows or whole)
+    if no_page:
+        cited_score, cited_lines = 0, []
+    else:
+        cited_score, cited_lines = _fuzzy_over(doc, frags, windows or whole)
     if cited_score >= ctx.threshold:
         return Result("fuzzy", "warning", cited_score, cited_lines, "wording differs slightly")
-    file_score, file_lines = (cited_score, cited_lines) if not windows else _fuzzy_over(doc, frags, whole)
-    if windows and file_score >= ctx.threshold:
-        return Result("wrong_location", "warning", file_score, file_lines, "similar text outside the cited lines")
+    file_score, file_lines = (cited_score, cited_lines) if windows is None else _fuzzy_over(doc, frags, whole)
+    if windows is not None and file_score >= ctx.threshold:
+        note = "page not in page map; similar text elsewhere in the file" if no_page else "similar text outside the cited lines"
+        return Result("wrong_location", "warning", file_score, file_lines, note)
     best, best_lines = (cited_score, cited_lines) if cited_score >= file_score else (file_score, file_lines)
     if best >= ctx.near_miss:
         result = Result("near_miss", "warning", best, best_lines,
