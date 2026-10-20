@@ -189,8 +189,8 @@ LangChain OpenWiki (claim carries the evidence version; staleness is a determini
 `.cache/verify_quotes.json` at the vault root, atomic write. Key:
 `sha256(normalized quote | raw path | loc)`. Value: `{verdict, severity, score, matched_lines,
 raw_sha256, pages_sha256, convert_sha256, dropped_sha256, threshold, algo, strict}`. An entry is
-reused only if all of these are unchanged. `algo` is the sha256 of the bytes of `verify_quotes.py`,
-`textnorm.py` and `citations.py`, so no manual version can be forgotten; a comment-only edit just
+reused only if all of these are unchanged. `algo` is the sha256 of the bytes of every `vq_*.py` module plus
+`verify_quotes.py`, `textnorm.py` and `citations.py`, so no manual version can be forgotten; a comment-only edit just
 rebuilds the cache once, which is cheap. Entries for quotes no longer present are
 dropped on full runs. Writes go to a temp file then `os.replace`; last writer wins (it is only a
 cache, so no lock). `--no-cache` disables it.
