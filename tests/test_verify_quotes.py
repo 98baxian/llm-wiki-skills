@@ -1078,3 +1078,37 @@ class TestShortFragments:
         c = claim("x", locs=(("unknown",),), fragments=["the long first fragment here", "but inaccurate"])
         monkeypatch.setattr(vq_match, "fuzzy_best", lambda d, f, r, after=0: (72, (1, 1), 0, 28))
         assert vq.verify_claim(c, ctx("some other text entirely")).verdict == "near_miss"
+
+
+_DETERMINISM_PROBE = '''
+import json, random, sys
+sys.path.insert(0, sys.argv[1])
+import vq_match
+out = []
+for g in (1, 2, 6, 11, 12, 16):
+    rng = random.Random(g)
+    vocab = [f"w{i}" for i in range(30)]
+    lines = [" ".join(rng.choice(vocab) for _ in range(40)) for _ in range(300)]
+    doc = vq_match.Doc("\\n".join(lines) + "\\n")
+    query = " ".join(rng.choice(vocab) for _ in range(10))
+    out.append(list(vq_match.fuzzy_best(doc, query, (1, 300))))
+print(json.dumps(out))
+'''
+
+
+def test_fuzzy_scores_do_not_depend_on_the_hash_seed(tmp_path):
+    """Same input, any process: the trigram ranking must not follow set iteration order."""
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    probe = tmp_path / "probe.py"
+    probe.write_text(_DETERMINISM_PROBE, encoding="utf-8")
+    scripts = str(Path(vq.__file__).resolve().parent)
+    outputs = set()
+    for seed in ("0", "1", "2", "3"):
+        env = dict(os.environ, PYTHONHASHSEED=seed)
+        run = subprocess.run([sys.executable, "-I", str(probe), scripts], capture_output=True, text=True, env=env, check=True)
+        outputs.add(run.stdout)
+    assert len(outputs) == 1

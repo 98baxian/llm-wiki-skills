@@ -174,13 +174,14 @@ def fuzzy_best(doc: Doc, fragment: str, line_range: tuple[int, int],
         index = doc.trigram_index()
         step = max(1, n // 2)
         votes: Counter = Counter()
-        for gram in {query[i:i + 3] for i in range(n - 2)}:
+        for gram in sorted({query[i:i + 3] for i in range(n - 2)}):     # sorted: no hash-seed dependence
             positions = index.get(gram)
             if not positions or len(positions) > MAX_POSTINGS:
                 continue
             for p in positions[bisect.bisect_left(positions, lo_n):bisect.bisect_right(positions, hi_n)]:
                 votes[p // step] += 1
-        starts = sorted({max(lo_n, b * step - n // 4) for b, _ in votes.most_common(TOP_CANDIDATES)})
+        top = sorted(votes.items(), key=lambda kv: (-kv[1], kv[0]))[:TOP_CANDIDATES]   # ties: earliest bucket
+        starts = sorted({max(lo_n, b * step - n // 4) for b, _ in top})
     best, best_span = 0, None
     width = int(n * 1.3) + 1
     for s in starts:
