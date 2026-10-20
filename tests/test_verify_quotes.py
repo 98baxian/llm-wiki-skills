@@ -1,5 +1,7 @@
 """Tests for quote extraction and binding (verify_quotes.extract_claims)."""
 import verify_quotes as vq
+import vq_match
+import vq_store
 
 
 def claims(text):
@@ -435,7 +437,7 @@ class TestFuzzyBranches:
             calls.append(line_range)
             return (cited, (2, 2), 10, 20) if len(calls) == 1 or whole is None else (whole, (9, 9), 90, 99)
 
-        monkeypatch.setattr(vq, "fuzzy_best", fake)
+        monkeypatch.setattr(vq_match, "fuzzy_best", fake)
 
     def run(self):
         return vq.verify_claim(claim("zzz qqq www vvv", locs=(("L", 2, 2),)), ctx("a", "b", "c"))
@@ -529,7 +531,7 @@ class TestSeverityDowngrades:
         assert r.severity == "error"
 
     def test_strict_promotes_near_miss(self, monkeypatch):
-        monkeypatch.setattr(vq, "fuzzy_best", lambda d, f, r: (72, (1, 1), 0, 5))
+        monkeypatch.setattr(vq_match, "fuzzy_best", lambda d, f, r: (72, (1, 1), 0, 5))
         c = claim("zzz qqq www vvv", locs=(("L", 1, 1),))
         assert vq.verify_claim(c, ctx("a", strict=True)).severity == "error"
         assert vq.verify_claim(c, ctx("a")).severity == "warning"
@@ -618,6 +620,48 @@ def test_algo_hash_is_stable_and_short():
     assert vq.algo_hash() == vq.algo_hash() and len(vq.algo_hash()) == 16
 
 
+def test_algo_hash_is_16_lowercase_hex():
+    assert re.fullmatch(r"[0-9a-f]{16}", vq.algo_hash())
+
+
+class TestAlgoHashCoversEveryModule:
+    """algo_hash fingerprints all vq_*.py plus verify_quotes.py, textnorm.py and citations.py."""
+
+    @pytest.fixture
+    def code_copy(self, tmp_path, monkeypatch):
+        self.original = vq.algo_hash()
+        src = Path(vq_store.CODE_DIR)
+        dst = tmp_path / "scripts"
+        dst.mkdir()
+        for f in src.glob("*.py"):
+            shutil.copy(f, dst / f.name)
+        monkeypatch.setattr(vq_store, "CODE_DIR", dst)
+        return dst
+
+    def test_copy_hashes_like_the_original(self, code_copy):
+        assert vq.algo_hash() == self.original
+        assert re.fullmatch(r"[0-9a-f]{16}", vq.algo_hash())
+
+    @pytest.mark.parametrize("name", ["vq_extract.py", "vq_match.py", "vq_store.py",
+                                      "verify_quotes.py", "textnorm.py", "citations.py"])
+    def test_changing_a_module_changes_the_hash(self, code_copy, name):
+        before = vq.algo_hash()
+        with open(code_copy / name, "ab") as f:
+            f.write(b"\n# changed\n")
+        assert vq.algo_hash() != before
+
+    def test_a_new_vq_module_changes_the_hash(self, code_copy):
+        before = vq.algo_hash()
+        (code_copy / "vq_extra.py").write_text("X = 1\n", encoding="utf-8")
+        assert vq.algo_hash() != before
+
+    def test_unrelated_files_do_not_change_the_hash(self, code_copy):
+        before = vq.algo_hash()
+        (code_copy / "lint_wiki.py").write_bytes(b"# changed\n")
+        (code_copy / "notes.txt").write_text("x", encoding="utf-8")
+        assert vq.algo_hash() == before
+
+
 def test_corpus_token_changes_when_raw_files_change(tmp_path):
     (tmp_path / "raw").mkdir()
     (tmp_path / "raw" / "a.md").write_text("one", encoding="utf-8")
@@ -630,6 +674,9 @@ def test_corpus_token_changes_when_raw_files_change(tmp_path):
 """verify_wiki, the JSON report, and the CLI."""
 import hashlib
 import json
+import re
+import shutil
+from pathlib import Path
 
 import pytest
 
@@ -963,10 +1010,10 @@ class TestScriptFold:
     TABLE = str.maketrans({"歡": "欢", "視": "视", "環": "环", "財": "财", "經": "经", "資": "资", "務": "务"})
 
     def fake_simplified(self, monkeypatch):
-        monkeypatch.setattr(vq.textnorm, "to_simplified", lambda s: s.translate(self.TABLE))
+        monkeypatch.setattr(vq_match.textnorm, "to_simplified", lambda s: s.translate(self.TABLE))
 
     def test_without_zhconv_the_traditional_text_does_not_match(self, monkeypatch):
-        monkeypatch.setattr(vq.textnorm, "to_simplified", lambda s: s)
+        monkeypatch.setattr(vq_match.textnorm, "to_simplified", lambda s: s)
         d = doc("開頭", "歡迎收看本台環球財經 今天", "結尾")
         c = claim("欢迎收看本台环球财经", locs=(("L", 2, 2),), fragments=["欢迎收看本台环球财经"])
         assert vq.verify_claim(c, vq.Context(doc=d)).verdict != "exact"
@@ -986,7 +1033,7 @@ class TestScriptFold:
 
     def test_simplified_doc_is_cached_and_identity_returns_self(self, monkeypatch):
         d = doc("abc")
-        monkeypatch.setattr(vq.textnorm, "to_simplified", lambda s: s)
+        monkeypatch.setattr(vq_match.textnorm, "to_simplified", lambda s: s)
         assert d.simplified() is d
         self.fake_simplified(monkeypatch)
         d2 = doc("歡迎")
@@ -1029,5 +1076,5 @@ class TestShortFragments:
 
     def test_missing_short_fragment_with_a_near_miss_long_one_is_near_miss(self, monkeypatch):
         c = claim("x", locs=(("unknown",),), fragments=["the long first fragment here", "but inaccurate"])
-        monkeypatch.setattr(vq, "fuzzy_best", lambda d, f, r, after=0: (72, (1, 1), 0, 28))
+        monkeypatch.setattr(vq_match, "fuzzy_best", lambda d, f, r, after=0: (72, (1, 1), 0, 28))
         assert vq.verify_claim(c, ctx("some other text entirely")).verdict == "near_miss"

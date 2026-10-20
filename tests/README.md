@@ -28,7 +28,7 @@ pytest                    # from the repo root
 | `test_lint_claims.py`, `test_lint_conversion.py` | `lint_wiki.py` | check 13 normalization, stale / lossy conversions |
 | `test_convert_real.py` | `convert_source.py` | real MinerU run, opt in with `-m slow` and `LLM_WIKI_TEST_PDF` |
 | `test_citations.py` | `citations.py` | the raw-citation grammar: ranges, lists, `p.N`, tolerant separators, malformed fragments |
-| `test_verify_quotes.py` | `verify_quotes.py` | quote extraction and binding, matching ladder, verdicts and severities, cache, report, CLI, `--flag` |
+| `test_verify_quotes.py` | `verify_quotes.py` (facade) and `vq_extract.py`, `vq_match.py`, `vq_store.py` | quote extraction and binding, matching ladder, verdicts and severities, cache, report, CLI, `--flag` |
 | `test_cascade_flag.py` | `cascade_flag.py` | shared FIX inserter; output identical to the pre-refactor algorithm |
 | `test_lint_verify_quotes.py` | `lint_wiki.py` | `--verify-quotes` level mapping; default run unchanged |
 | `test_verify_quotes_slow.py` | `verify_quotes.py` | 1 MB performance guard; opt-in pass over a vault copy (`VQ_REAL_VAULT`), `-m slow` |

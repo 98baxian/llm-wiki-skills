@@ -58,7 +58,14 @@ Three modules, all in `llm-wiki/scripts/`:
   Cites are found by scanning for `raw_path , locs` anywhere on the line (so several in one
   parenthesis are separate citations). A `(raw/` fragment with no cite starting at it is `malformed`.
 - `textnorm.py` from Spec A (`normalize`, `fold_case`, `loose`, `normalize_with_map`).
-- `verify_quotes.py` (split only if it passes ~500 lines), importable and CLI.
+- `verify_quotes.py`, importable and CLI. The verifier outgrew one file (~1000 lines), so the code is
+  split into focused modules with no behaviour change; `verify_quotes.py` stays the entry point and the
+  public facade (`verify_wiki`, `tally`, `print_summary`, `flag_report`, `main`, `UsageError`) and
+  re-exports every name from the modules below, so `import verify_quotes as vq; vq.Doc` still works:
+  - `vq_extract.py`: quote extraction and binding (`Claim`, `ExtractResult`, `extract_claims`, `fragments_of`).
+  - `vq_match.py`: the matching ladder, fuzzy fallback and verdicts (`Doc`, `match_fragments`, `fuzzy_best`,
+    `Result`, `Context`, `verify_claim`).
+  - `vq_store.py`: claim identity, `algo_hash`, the cache and the raw-file store (`claim_key`, `Cache`, `RawStore`).
 
 ```
 extract_claims(page_text, page_path) -> (claims, uncited)      # §4

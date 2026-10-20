@@ -17,6 +17,15 @@ Options: `--page PATH` (repeatable), `--threshold N` (fuzzy similarity, default 
 Exit codes: 0 no error-severity quote, 1 at least one, 2 usage error.
 Add `.cache/` to the vault's `.gitignore`; it holds the incremental verdict cache.
 
+## Files
+
+All in `llm-wiki/scripts/`: `verify_quotes.py` (entry point and public facade: `verify_wiki`, `main`,
+report), `vq_extract.py` (quote extraction and binding to citations), `vq_match.py` (matching ladder,
+fuzzy fallback, verdicts), `vq_store.py` (claim identity, cache, raw-file store). Copy all of them
+together with `citations.py`, `textnorm.py` and `vault_config.py`. The cache fingerprint (`algo`) hashes
+every `vq_*.py` plus `verify_quotes.py`, `textnorm.py` and `citations.py`, so editing any of them
+invalidates cached verdicts.
+
 ## What counts as a quote
 
 Text in `"..."`, curly quotes, `「...」` or `『...』`, and a run of `>` blockquote lines, on one line
