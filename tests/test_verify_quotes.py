@@ -338,6 +338,25 @@ class TestLadder:
         r = vq.verify_claim(c, ctx("开头", "他说 明年 继续 扩建 社区 图书馆 。", "结尾"))
         assert (r.verdict, r.note, r.matched_lines) == ("exact", "loose", [2, 2])
 
+    def test_short_quote_matching_only_loosely_is_fuzzy(self):
+        r = vq.verify_claim(claim("state of the art", locs=(("L", 1, 1),)), ctx("It is State-of-the-Art work"))
+        assert (r.verdict, r.score, r.severity, r.note) == ("fuzzy", 95, "warning", "loose match on short quote")
+
+    def test_short_quote_differing_only_by_whitespace_between_characters_stays_exact(self):
+        c = claim("图书馆可以延长", locs=(("L", 1, 1),), fragments=["图书馆可以延长"])
+        assert vq.is_short(c.quote)
+        r = vq.verify_claim(c, ctx("他说 图书馆 可以 延长 了"))
+        assert (r.verdict, r.note, r.matched_lines) == ("exact", "loose", [1, 1])
+
+    def test_short_latin_quote_with_split_spaces_stays_exact(self):
+        r = vq.verify_claim(claim("data driven models", locs=(("L", 1, 1),)), ctx("use datadriven models now"))
+        assert (r.verdict, r.note) == ("exact", "loose")
+
+    def test_long_quote_with_punctuation_differences_is_exact(self):
+        q = "the quick brown fox jumps over the lazy dog"
+        r = vq.verify_claim(claim(q, locs=(("L", 1, 1),)), ctx("The quick, brown fox jumps over the lazy dog!"))
+        assert (r.verdict, r.note) == ("exact", "loose")
+
     def test_whole_file_is_the_cited_place_for_location_unknown(self):
         r = vq.verify_claim(claim("The Cell divides rapidly", locs=(("unknown",),)), ctx(*self.D))
         assert r.verdict == "exact"

@@ -277,8 +277,13 @@ class Doc:
     def view(self, mode: str, join_hyphen: bool = True) -> tuple[str, list[int]]:
         key = (mode, join_hyphen)
         if key not in self._views:
-            self._views[key] = textnorm.normalize_with_map(
-                self.text, fold=(mode == "fold"), loose_mode=(mode == "loose"), join_hyphen=join_hyphen)
+            if mode == "nospace":      # case-folded with every whitespace character removed, punctuation kept
+                text, offs = textnorm.normalize_with_map(self.text, fold=True, join_hyphen=join_hyphen)
+                keep = [k for k, c in enumerate(text) if not c.isspace()]
+                self._views[key] = ("".join(text[k] for k in keep), [offs[k] for k in keep])
+            else:
+                self._views[key] = textnorm.normalize_with_map(
+                    self.text, fold=(mode == "fold"), loose_mode=(mode == "loose"), join_hyphen=join_hyphen)
         return self._views[key]
 
     def has_hyphen_break(self) -> bool:
@@ -337,6 +342,8 @@ def needle_for(mode: str, fragment: str) -> str:
         return textnorm.normalize(fragment)
     if mode == "fold":
         return textnorm.fold_case(fragment)
+    if mode == "nospace":
+        return "".join(textnorm.fold_case(fragment).split())
     return textnorm.loose(fragment)
 
 
@@ -603,6 +610,8 @@ def verify_claim(claim: Claim, ctx: Context) -> Result:
                 if short:
                     return Result("fuzzy", "warning", 95, where, "case differs")
                 return Result("exact", "none", 100, where, "case differs")
+            if short and match_fragments(doc, frags, "nospace", ranges) is None:
+                return Result("fuzzy", "warning", 95, where, "loose match on short quote")
             return Result("exact", "none", 100, where, "loose")
         folded = doc.simplified()
         if folded is not doc:
