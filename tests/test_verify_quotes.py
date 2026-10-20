@@ -342,6 +342,29 @@ class TestLadder:
         c = claim("The Cell divides rapidly", locs=(("p", 9, 9),))
         assert vq.verify_claim(c, ctx(*self.D)).verdict == "exact"
 
+    def test_later_fragment_is_matched_after_the_earlier_one_not_by_a_decoy_before_it(self):
+        lines = [
+            "the quick brown fox jumps over the lazy dog today",             # decoy: exact text of fragment 2
+            "unrelated filler about astronomy and distant galaxies",
+            "alpha beta gamma delta epsilon zeta eta theta",                 # fragment 1
+            "more filler about gardening and soil composition",
+            "the quick brown fox leaps over the lazy dog today",             # real match, one word differs
+        ]
+        c = claim("x", locs=(("unknown",),), fragments=["alpha beta gamma delta epsilon zeta", "the quick brown fox jumps over the lazy dog today"])
+        r = vq.verify_claim(c, ctx(*lines))
+        assert r.verdict == "fuzzy", r
+        assert r.matched_lines[1] == 5
+
+    def test_fuzzy_best_respects_a_minimum_start_position(self):
+        d = doc("the quick brown fox jumps over the lazy dog today",
+                "filler filler filler filler filler filler filler filler",
+                "the quick brown fox leaps over the lazy dog today")
+        q = "the quick brown fox jumps over the lazy dog today"
+        _, lines, pos = vq.fuzzy_best(d, q, (1, 3))
+        assert lines == (1, 1)
+        _, lines, _ = vq.fuzzy_best(d, q, (1, 3), after=pos + len(q))
+        assert lines == (3, 3)
+
     def test_several_locations_any_may_hold_the_quote(self):
         lines = ["x"] * 60 + ["the quoted passage is right here"]
         c = claim("the quoted passage is right here", locs=(("L", 1, 1), ("L", 61, 61)))
