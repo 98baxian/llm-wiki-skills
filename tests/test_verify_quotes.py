@@ -68,6 +68,30 @@ class TestIgnoredRegions:
         assert quotes('See [[concepts/x|"a long alias that looks quoted"]] (raw/a.md, L1)\n') == []
 
 
+class TestDelimitersInsideQuotes:
+    def test_wikilink_inside_a_quote_keeps_its_text(self):
+        assert quotes('He wrote "The [[Transformer]] model" here (raw/x.md, L1)\n') == ["The Transformer model"]
+
+    def test_wikilink_alias_wins_over_target_inside_a_quote(self):
+        assert quotes('He wrote "The [[concepts/tf|Transformer]] model" here (raw/x.md, L1)\n') == ["The Transformer model"]
+
+    def test_inline_code_inside_a_quote_keeps_its_text(self):
+        assert quotes('He wrote "call `foo()` to start" here (raw/x.md, L1)\n') == ["call foo() to start"]
+
+    def test_fragments_are_stripped_too(self):
+        c = claims('"the [[first]] long fragment ... and `second` long fragment" (raw/x.md, L1)\n').claims[0]
+        assert c.fragments == ["the first long fragment", "and second long fragment"]
+
+    def test_blockquote_keeps_wikilink_text(self):
+        assert quotes('> The [[Transformer]] model works (raw/x.md, L1)\n') == ["The Transformer model works"]
+
+    def test_wikilink_and_code_quotes_verify_exact_against_the_raw(self):
+        for text, raw in [('"The [[Transformer]] model" (raw/x.md, L1)\n', "The Transformer model"),
+                          ('"call `foo()` to start" (raw/x.md, L1)\n', "call foo() to start")]:
+            c = claims(text).claims[0]
+            assert vq.verify_claim(c, vq.Context(doc=vq.Doc(raw + "\n"))).verdict == "exact", text
+
+
 class TestBinding:
     def test_binds_to_first_citation_on_its_right(self):
         text = 'First "quote number one here" (raw/a.md, L1) then "quote number two here" (raw/b.md, L2)\n'

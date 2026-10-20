@@ -116,20 +116,37 @@ def _blank(m: re.Match) -> str:
     return " " * len(m.group(0))
 
 
-def prepare(line: str) -> str:
-    """Line with citations, comments, inline code, links and wikilinks blanked (same length)."""
+def prepare(line: str, keep_text: bool = False) -> str:
+    """Line with citations, comments, inline code, links and wikilinks blanked (same length).
+
+    ``keep_text`` leaves inline code and wikilinks readable (still the same length), so the text
+    of a quote found in the blanked line can be read back from it.
+    """
     out = citations.mask_citations(line)
     out = re.sub(r"<!--.*?-->", _blank, out)
-    out = re.sub(r"`[^`\n]*`", _blank, out)
-    out = re.sub(r"\[\[[^\]\n]*\]\]", _blank, out)
+    if not keep_text:
+        out = re.sub(r"`[^`\n]*`", _blank, out)
+        out = re.sub(r"\[\[[^\]\n]*\]\]", _blank, out)
     return re.sub(r"\]\([^)\n]*\)", _blank, out)
 
 
-def _inline_quotes(prepared: str):
+WIKILINK_RE = re.compile(r"\[\[([^\]\n]*)\]\]")
+INLINE_CODE_RE = re.compile(r"`([^`\n]*)`")
+
+
+def strip_delimiters(text: str) -> str:
+    """Drop ``[[ ]]`` (keeping the alias, else the target as written) and backticks, keeping the text."""
+    text = WIKILINK_RE.sub(lambda m: m.group(1).split("|", 1)[-1], text)
+    return INLINE_CODE_RE.sub(lambda m: m.group(1), text)
+
+
+def _inline_quotes(prepared: str, kept: str | None = None):
+    """Quotes found in ``prepared``; their text is read from ``kept`` (same length) when given."""
+    kept = prepared if kept is None else kept
     found = []
     for rx in QUOTE_RES:
         for m in rx.finditer(prepared):
-            found.append((m.start(), m.end(), m.group(1).strip()))
+            found.append((m.start(), m.end(), kept[m.start(1):m.end(1)].strip()))
     found.sort()
     out, last_end = [], -1
     for start, end, q in found:
@@ -152,6 +169,7 @@ def extract_claims(text: str, page: str) -> ExtractResult:
     n = len(rows)
     cites = [citations.find_citations(line) for _, line in rows]
     prepared = [prepare(line) for _, line in rows]
+    kept = [prepare(line, keep_text=True) for _, line in rows]
     for (no, line) in rows:
         for frag in citations.malformed(line):
             res.malformed.append((page, no, frag))
@@ -192,7 +210,8 @@ def extract_claims(text: str, page: str) -> ExtractResult:
             j = k
             while j + 1 < n and kind[j + 1] == "quote":
                 j += 1
-            body = " ".join(prepared[i].strip().lstrip(">").strip() for i in range(k, j + 1))
+            body = " ".join(kept[i].strip().lstrip(">").strip() for i in range(k, j + 1))
+            body = strip_delimiters(body)
             body = " ".join(re.sub(r"[(（]\s*[)）]", " ", body).split())   # parentheses left empty by the masked citation
             frags = fragments_of(body) if body else []
             if not frags:
@@ -211,7 +230,8 @@ def extract_claims(text: str, page: str) -> ExtractResult:
                     bound.append(Claim(page, rows[k][0], body, frags, hit[1].raw, hit[1].locs, rows[hit[0]][0]))
             k = j + 1
             continue
-        for start, end, q in _inline_quotes(prepared[k]):
+        for start, end, q in _inline_quotes(prepared[k], kept[k]):
+            q = strip_delimiters(q)
             frags = fragments_of(q)
             if not frags:
                 res.too_short += 1
