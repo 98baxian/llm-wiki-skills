@@ -236,26 +236,26 @@ class TestFuzzy:
 
     def test_one_word_changed_scores_high_and_reports_its_line(self):
         d = doc(*self.TEXT)
-        score, lines, pos = vq.fuzzy_best(d, "the quick brown fox jumps over the lazy cat near the river bank", (1, 3))
+        score, lines, pos, _ = vq.fuzzy_best(d, "the quick brown fox jumps over the lazy cat near the river bank", (1, 3))
         assert score >= vq.THRESHOLD and lines == (2, 2) and pos > 0
 
     def test_unrelated_sentence_scores_below_near_miss(self):
         d = doc(*self.TEXT)
-        score, _, _ = vq.fuzzy_best(d, "photosynthesis converts sunlight into chemical energy inside chloroplasts", (1, 3))
+        score, _, _, _ = vq.fuzzy_best(d, "photosynthesis converts sunlight into chemical energy inside chloroplasts", (1, 3))
         assert score < vq.NEAR_MISS
 
     def test_cjk_is_measured_in_characters(self):
         d = doc("无关的内容放在这里", "图书馆可以延长开放时间，但是人手必须先补上才行", "其他内容")
-        score, lines, _ = vq.fuzzy_best(d, "图书馆可以延长开放时间，但人手必须先补上", (1, 3))
+        score, lines, _, _ = vq.fuzzy_best(d, "图书馆可以延长开放时间，但人手必须先补上", (1, 3))
         assert score >= vq.THRESHOLD and lines == (2, 2)
 
     def test_search_is_limited_to_the_line_range(self):
         d = doc(*self.TEXT)
-        score, _, _ = vq.fuzzy_best(d, "the quick brown fox jumps over the lazy cat near the river bank", (1, 1))
+        score, _, _, _ = vq.fuzzy_best(d, "the quick brown fox jumps over the lazy cat near the river bank", (1, 1))
         assert score < vq.NEAR_MISS
 
     def test_tiny_queries_are_not_scored(self):
-        assert vq.fuzzy_best(doc("abc def"), "ab", (1, 1)) == (0, None, -1)
+        assert vq.fuzzy_best(doc("abc def"), "ab", (1, 1)) == (0, None, -1, -1)
 
     def test_large_ranges_use_the_trigram_index(self):
         rng = random.Random(7)
@@ -264,7 +264,7 @@ class TestFuzzy:
         lines[250] = "the quick brown fox jumps over the lazy dog near the river bank today"
         d = doc(*lines)
         assert len(d.text) > vq.SCAN_LIMIT * 4
-        score, found, _ = vq.fuzzy_best(d, "the quick brown fox jumps over the lazy cat near the river bank", (1, 400))
+        score, found, _, _ = vq.fuzzy_best(d, "the quick brown fox jumps over the lazy cat near the river bank", (1, 400))
         assert score >= vq.THRESHOLD and found == (251, 251)
 
 
@@ -379,14 +379,20 @@ class TestLadder:
         assert r.verdict == "fuzzy", r
         assert r.matched_lines[1] == 5
 
+    def test_later_fragment_may_not_reuse_the_text_of_the_earlier_one(self):
+        # "gamma delta epsilon" only exists overlapping the end of fragment 1: the next fragment must
+        # start after fragment 1's match ENDS, not just after it starts
+        c = claim("x", locs=(("unknown",),), fragments=["alpha beta gamma delta", "gamma delta epsilon"])
+        assert vq.verify_claim(c, ctx("alpha beta gamma delta epsilon")).verdict == "not_found"
+
     def test_fuzzy_best_respects_a_minimum_start_position(self):
         d = doc("the quick brown fox jumps over the lazy dog today",
                 "filler filler filler filler filler filler filler filler",
                 "the quick brown fox leaps over the lazy dog today")
         q = "the quick brown fox jumps over the lazy dog today"
-        _, lines, pos = vq.fuzzy_best(d, q, (1, 3))
+        _, lines, _, end = vq.fuzzy_best(d, q, (1, 3))
         assert lines == (1, 1)
-        _, lines, _ = vq.fuzzy_best(d, q, (1, 3), after=pos + len(q))
+        _, lines, _, _ = vq.fuzzy_best(d, q, (1, 3), after=end)
         assert lines == (3, 3)
 
     def test_several_locations_any_may_hold_the_quote(self):
@@ -403,7 +409,7 @@ class TestFuzzyBranches:
 
         def fake(doc, fragment, line_range):
             calls.append(line_range)
-            return (cited, (2, 2), 10) if len(calls) == 1 or whole is None else (whole, (9, 9), 90)
+            return (cited, (2, 2), 10, 20) if len(calls) == 1 or whole is None else (whole, (9, 9), 90, 99)
 
         monkeypatch.setattr(vq, "fuzzy_best", fake)
 
@@ -499,7 +505,7 @@ class TestSeverityDowngrades:
         assert r.severity == "error"
 
     def test_strict_promotes_near_miss(self, monkeypatch):
-        monkeypatch.setattr(vq, "fuzzy_best", lambda d, f, r: (72, (1, 1), 0))
+        monkeypatch.setattr(vq, "fuzzy_best", lambda d, f, r: (72, (1, 1), 0, 5))
         c = claim("zzz qqq www vvv", locs=(("L", 1, 1),))
         assert vq.verify_claim(c, ctx("a", strict=True)).severity == "error"
         assert vq.verify_claim(c, ctx("a")).severity == "warning"

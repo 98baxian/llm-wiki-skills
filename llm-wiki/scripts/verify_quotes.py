@@ -373,11 +373,13 @@ def partial_match(query: str, window: str) -> tuple[int, tuple[int, int] | None]
 
 
 def fuzzy_best(doc: Doc, fragment: str, line_range: tuple[int, int],
-               after: int = 0) -> tuple[int, tuple[int, int] | None, int]:
-    """Best fuzzy score of ``fragment`` inside ``line_range``: ``(score, (first_line, last_line), position)``.
+               after: int = 0) -> tuple[int, tuple[int, int] | None, int, int]:
+    """Best fuzzy score of ``fragment`` inside ``line_range``:
+    ``(score, (first_line, last_line), start, end)``.
 
-    ``position`` is the index of the match in the loose view (-1 when nothing matched). ``after`` is
-    the minimum loose-view start position, so ellipsis fragments can be searched in order.
+    ``start`` and ``end`` (exclusive) delimit the match in the loose view (-1 when nothing matched).
+    ``after`` is the minimum loose-view start position, so ellipsis fragments can be searched in
+    order: each one after the previous fragment's ``end``.
 
     Small ranges are scanned; large ones first rank windows by character-trigram overlap
     (an inverted index built once per raw file) and only the top candidates are scored.
@@ -385,7 +387,7 @@ def fuzzy_best(doc: Doc, fragment: str, line_range: tuple[int, int],
     query = textnorm.loose(fragment)
     n = len(query)
     if n < MIN_FUZZY_CHARS:
-        return 0, None, -1
+        return 0, None, -1, -1
     text, offs = doc.view("loose")
     lo, hi = doc.offsets_for_lines(*line_range)
     lo_n = bisect.bisect_left(offs, lo)
@@ -411,8 +413,8 @@ def fuzzy_best(doc: Doc, fragment: str, line_range: tuple[int, int],
         if score > best and rel is not None:
             best, best_span = score, (s + rel[0], s + rel[1])
     if best_span is None:
-        return 0, None, -1
-    return best, (doc.line_of(offs[best_span[0]]), doc.line_of(offs[best_span[1]])), best_span[0]
+        return 0, None, -1, -1
+    return best, (doc.line_of(offs[best_span[0]]), doc.line_of(offs[best_span[1]])), best_span[0], best_span[1] + 1
 
 
 @dataclass
@@ -490,15 +492,15 @@ def _fuzzy_over(doc: Doc, fragments: list[str], ranges: list[tuple[int, int]]) -
     best_per_fragment = []
     after = 0
     for frag in fragments:
-        best: tuple[int, tuple[int, int] | None, int] = (0, None, -1)
+        best: tuple[int, tuple[int, int] | None, int, int] = (0, None, -1, -1)
         for rng in ranges:
-            # ellipsis fragments must appear in order: each one is searched after the previous match
+            # ellipsis fragments must appear in order: each one is searched after the previous match ends
             cand = fuzzy_best(doc, frag, rng, after=after) if after else fuzzy_best(doc, frag, rng)
             if cand[0] > best[0]:
                 best = cand
         best_per_fragment.append(best)
-        if best[2] >= 0:
-            after = best[2] + 1
+        if best[3] >= 0:
+            after = best[3]
     scores = [b[0] for b in best_per_fragment]
     spans = [b[1] for b in best_per_fragment]
     found = [s for s in spans if s]
