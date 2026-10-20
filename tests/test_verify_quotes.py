@@ -154,10 +154,15 @@ class TestEllipsis:
             c = claims(text).claims[0]
             assert c.fragments == ["the first long fragment", "and the second long fragment"], ell
 
-    def test_short_fragments_are_dropped_but_one_must_remain(self):
+    def test_short_fragments_are_kept_but_one_must_be_long(self):
         c = claims('He said "the first long fragment ... ok" (raw/a.md, L1)\n').claims[0]
-        assert c.fragments == ["the first long fragment"]
+        assert c.fragments == ["the first long fragment", "ok"]
         assert claims('He said "ok ... no" (raw/a.md, L1)\n').claims == []
+        assert claims('He said "ok ... no" (raw/a.md, L1)\n').too_short == 1
+
+    def test_empty_fragments_from_a_leading_or_doubled_ellipsis_are_dropped(self):
+        c = claims('He said "... the first long fragment ... ... and the second long fragment" (raw/a.md, L1)\n').claims[0]
+        assert c.fragments == ["the first long fragment", "and the second long fragment"]
 
 
 def test_malformed_citations_are_reported_with_page_and_line():
@@ -957,3 +962,43 @@ class TestScriptFold:
         self.fake_simplified(monkeypatch)
         d2 = doc("歡迎")
         assert d2.simplified() is d2.simplified() and d2.simplified().text == "欢迎\n"
+
+
+class TestShortFragments:
+    """Fragments under the minimum length must be found, in order, and are never fuzzy-matched."""
+
+    def verdict(self, quote, *raw_lines):
+        text = f'"{quote}" (raw/a.md, L1)\n'
+        c = claims(text).claims[0]
+        return vq.verify_claim(c, vq.Context(doc=vq.Doc("\n".join(raw_lines) + "\n")))
+
+    def test_negation_hidden_behind_a_short_fragment_is_not_found(self):
+        r = self.verdict("The algorithm is fast [...] but inaccurate", "The algorithm is fast and accurate")
+        assert r.verdict == "not_found"
+
+    def test_short_fragment_present_in_order_is_exact(self):
+        r = self.verdict("The algorithm is fast [...] but inaccurate", "The algorithm is fast and but inaccurate here")
+        assert r.verdict == "exact"
+
+    def test_short_fragment_present_only_before_the_first_fragment_is_not_found(self):
+        r = self.verdict("The algorithm is fast [...] but inaccurate", "but inaccurate they said", "The algorithm is fast and good")
+        assert r.verdict == "not_found"
+
+    def test_short_fragment_first_then_a_long_one(self):
+        r = self.verdict("but inaccurate [...] The algorithm is fast", "but inaccurate they said", "The algorithm is fast")
+        assert r.verdict == "exact"
+        assert self.verdict("but inaccurate [...] The algorithm is fast", "The algorithm is fast", "but inaccurate").verdict == "not_found"
+
+    def test_cjk_short_fragment_matches_through_asr_spacing(self):
+        r = self.verdict("图书馆可以延长开放时间，但是人手必须先补上才行 [...] 社区图书馆",
+                         "他说 图书馆 可以 延长 开放 时间 但是 人手 必须 先 补上 才行 然后 扩建 社区 图书 馆")
+        assert (r.verdict, r.note) == ("exact", "loose")
+
+    def test_missing_short_fragment_never_gives_fuzzy_even_when_the_long_one_is_only_fuzzy(self):
+        r = self.verdict("The algorithm is really fast [...] but inaccurate", "The algorithm is fast and accurate")
+        assert r.verdict in ("not_found", "near_miss")
+
+    def test_missing_short_fragment_with_a_near_miss_long_one_is_near_miss(self, monkeypatch):
+        c = claim("x", locs=(("unknown",),), fragments=["the long first fragment here", "but inaccurate"])
+        monkeypatch.setattr(vq, "fuzzy_best", lambda d, f, r, after=0: (72, (1, 1), 0, 28))
+        assert vq.verify_claim(c, ctx("some other text entirely")).verdict == "near_miss"

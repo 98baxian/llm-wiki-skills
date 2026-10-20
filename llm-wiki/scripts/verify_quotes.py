@@ -60,8 +60,14 @@ def long_enough(q: str) -> bool:
 
 
 def fragments_of(quote: str) -> list[str]:
+    """Non-empty pieces of ``quote`` around its ellipses, or ``[]`` when none is long enough.
+
+    Pieces under the minimum length ("short fragments") are kept: they must still be found, in
+    order, but are never fuzzy-matched.
+    """
     parts = [p.strip() for p in ELLIPSIS_RE.split(quote)] if ELLIPSIS_RE.search(quote) else [quote.strip()]
-    return [p for p in parts if long_enough(p)]
+    parts = [p for p in parts if p]
+    return parts if any(long_enough(p) for p in parts) else []
 
 
 @dataclass
@@ -488,11 +494,33 @@ def scripts_cannot_overlap(quote: str, raw_cjk_share: float) -> bool:
     return quote_cjk == 0 and len(quote.split()) >= 3 and raw_cjk_share > 0.6
 
 
-def _fuzzy_over(doc: Doc, fragments: list[str], ranges: list[tuple[int, int]]) -> tuple[int, list[int]]:
+def _fuzzy_over(doc: Doc, fragments: list[str], ranges: list[tuple[int, int]],
+                threshold: int = THRESHOLD, near_miss: int = NEAR_MISS) -> tuple[int, list[int]]:
+    """Fuzzy score of an ellipsis quote, fragments taken in order (each after the previous match).
+
+    Long fragments are scored by similarity. A short fragment is not scored: it is either found
+    (literal, case-folded or loose view, which covers spaced ASR text) after the previous fragment,
+    or missing. A missing short fragment keeps the quote below ``threshold``, so it can never end up
+    ``fuzzy``; it stays a ``near_miss`` only when the long fragments themselves scored in that band.
+    """
     best_per_fragment = []
+    short_missing = False
     after = 0
     for frag in fragments:
         best: tuple[int, tuple[int, int] | None, int, int] = (0, None, -1, -1)
+        if not long_enough(frag):
+            needle = textnorm.loose(frag)
+            for rng in ranges:
+                span = doc.find(needle, "loose", rng, after=after) if needle else None
+                if span is not None and (best[2] < 0 or span[0] < best[2]):
+                    a, b = doc.lines_of_span("loose", span)
+                    best = (100, (a, b), span[0], span[1])
+            if best[2] < 0:
+                short_missing = True
+                continue              # a missing short fragment does not move the cursor
+            best_per_fragment.append((None,) + best[1:])
+            after = best[3]
+            continue
         for rng in ranges:
             # ellipsis fragments must appear in order: each one is searched after the previous match ends
             cand = fuzzy_best(doc, frag, rng, after=after) if after else fuzzy_best(doc, frag, rng)
@@ -501,11 +529,14 @@ def _fuzzy_over(doc: Doc, fragments: list[str], ranges: list[tuple[int, int]]) -
         best_per_fragment.append(best)
         if best[3] >= 0:
             after = best[3]
-    scores = [b[0] for b in best_per_fragment]
+    scores = [b[0] for b in best_per_fragment if b[0] is not None]
     spans = [b[1] for b in best_per_fragment]
     found = [s for s in spans if s]
     lines = [min(s[0] for s in found), max(s[1] for s in found)] if found else []
-    return (min(scores) if scores else 0), lines
+    score = min(scores) if scores else 0
+    if short_missing and score >= threshold:
+        score = near_miss - 1
+    return score, lines
 
 
 def _apply_severity(result: Result, claim: Claim, ctx: Context) -> Result:
@@ -591,10 +622,10 @@ def verify_claim(claim: Claim, ctx: Context) -> Result:
     if no_page:
         cited_score, cited_lines = 0, []
     else:
-        cited_score, cited_lines = _fuzzy_over(doc, frags, windows or whole)
+        cited_score, cited_lines = _fuzzy_over(doc, frags, windows or whole, ctx.threshold, ctx.near_miss)
     if cited_score >= ctx.threshold:
         return Result("fuzzy", "warning", cited_score, cited_lines, "wording differs slightly")
-    file_score, file_lines = (cited_score, cited_lines) if windows is None else _fuzzy_over(doc, frags, whole)
+    file_score, file_lines = (cited_score, cited_lines) if windows is None else _fuzzy_over(doc, frags, whole, ctx.threshold, ctx.near_miss)
     if windows is not None and file_score >= ctx.threshold:
         note = "page not in page map; similar text elsewhere in the file" if no_page else "similar text outside the cited lines"
         return Result("wrong_location", "warning", file_score, file_lines, note)
