@@ -25,7 +25,8 @@ Minimum length: 3 Latin words or 12 CJK characters; with a digit, 2 words or 6 c
 binds to the first citation to its right on the same line, otherwise the first citation later in the
 same paragraph, list item or blockquote group (never across table rows). A quote with no citation is
 counted as `uncited`, never as a failure. `[...]`, `...`, `…`, `……` and `⋯` split a quote into fragments that must
-all occur, in order.
+all occur, in order. A fragment under the minimum length is still required (found in order, never
+fuzzy-matched): `"X is fast [...] but inaccurate"` fails if `but inaccurate` is missing.
 
 ## Citation forms understood
 
@@ -39,7 +40,7 @@ malformed citation. For a PDF cite the converted markdown (`raw/converted/<slug>
 | Verdict | Meaning | Severity |
 |---|---|---|
 | `exact` | found in the cited lines (literal, case-folded for long quotes, loose, script-folded, or page margin) | none |
-| `fuzzy` | similar (>= threshold) in the cited lines, or a short quote that differs only in case | warning |
+| `fuzzy` | similar (>= threshold) in the cited lines, or a short quote that differs only in case or matches only loosely | warning |
 | `wrong_location` | found, but outside the cited lines (lines reported) | warning |
 | `near_miss` | similarity 60-85: probably a paraphrase in quotation marks | warning |
 | `not_found` | nowhere in the file; `suggested_raw` names another raw file that has it | **error** |
@@ -47,7 +48,8 @@ malformed citation. For a PDF cite the converted markdown (`raw/converted/<slug>
 
 `not_found` is downgraded to a warning when the raw file is a lossy conversion (`lossy: true`) or
 the page map has low confidence and the citation is a page number; `--strict` keeps it an error and
-also makes `near_miss` an error. A quote that cannot occur in the raw file because the scripts do
+also makes `near_miss` an error, so a strict run exits 1 for it; `--flag` still annotates only
+error-severity `not_found` results, never a `near_miss`. A quote that cannot occur in the raw file because the scripts do
 not overlap (6+ CJK letters against an English raw file, or the reverse) is `unverifiable` instead
 of `not_found`, but only after every match attempt failed.
 

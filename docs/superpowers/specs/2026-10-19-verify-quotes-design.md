@@ -126,8 +126,10 @@ Offsets are mapped back to raw line numbers with `normalize_with_map` (`matched_
    characters) → `exact`, note "case differs"; a **short** quote that matches only here → `fuzzy`,
    score 95, note "case differs" (short strings collide easily: `"act"` / `"ACT"`).
 3. **Loose**: `loose(...)` on both sides (drops whitespace, Markdown markers and punctuation; this is
-   what makes ASR transcripts with spaces between CJK words match) → `exact`, note "loose". Quotes
-   under the minimum length are never matched at this rung.
+   what makes ASR transcripts with spaces between CJK words match) → `exact`, note "loose". A
+   **short** quote that matches only here → `fuzzy`, score 95, note "loose match on short quote",
+   unless the only difference is whitespace between characters (the quote also matches a
+   case-folded view with all whitespace removed and punctuation kept), which stays `exact`.
 4. **Script fold** (only if `zhconv` is importable): Traditional → Simplified, then rungs 1-3 →
    `exact`, note "script-folded".
 5. **Fuzzy**: similarity ≥ threshold (default 85, `--threshold`) → `fuzzy` with score. No blind
@@ -138,6 +140,12 @@ Offsets are mapped back to raw line numbers with `normalize_with_map` (`matched_
 
 Ellipsis fragments each climb the ladder in order, with a cursor so the next fragment must start
 after the previous one; the verdict is the weakest rung used.
+Fragments under the minimum length ("short fragments") are kept, never dropped: each must be found
+in order after the previous fragment, at the literal, case-folded or loose rung, and is never
+fuzzy-matched. A missing short fragment makes the quote `not_found` (or `near_miss` when the long
+fragments themselves score in that band), never `exact` or `fuzzy`. A quote made only of short
+fragments is still too short to check. In the fuzzy stage each fragment is searched after the
+previous fragment's match end.
 
 Search scope per rung: the cited window first, then the whole file, then `dropped.txt`.
 
@@ -161,6 +169,8 @@ warnings (`unverifiable` a suggestion in lint). A `not_found` is downgraded to `
 `p.N`; each downgrade prints a CLI notice. `--strict` promotes both the downgraded `not_found` and
 `near_miss` to errors, so a fabricated quote cannot hide behind a lossy conversion or a loose
 rewording. Only an `error` fails the run, appears in lint as ERROR, or is written by `--flag`.
+Consequence: with `--strict` a `near_miss` or downgraded `not_found` makes the run exit 1, but
+`--flag` still annotates only error-severity `not_found` results, never a `near_miss`.
 
 Line numbers in reports are translated to "PDF p.N" through `pages.json` when present.
 
@@ -206,7 +216,8 @@ verify_quotes.py <wiki-root> [--page PATH]... [--threshold N] [--report PATH]
 ```
 
 `--page` is repeatable and restricts the run to those wiki files. Exit 0: no error-severity
-`not_found`. Exit 1: at least one. Exit 2: usage or environment error (bad args, no `wiki/`).
+result. Exit 1: at least one; normally only `not_found` is an error, and `--strict` also fails the
+run for `near_miss` (and for a downgraded `not_found`). Exit 2: usage or environment error (bad args, no `wiki/`).
 Without `--flag`, wiki and raw are not modified (tested by hashing both trees).
 
 ### `--flag`
@@ -216,7 +227,8 @@ For each error-severity `not_found`, insert one comment on the line after the qu
 `sha256(normalized quote | raw path | loc)`. Idempotency is by `[vq:<id>]` present in the FIX
 comments directly following the quote's line, so editing the wording of a line never duplicates a
 comment. Per file, insertions are applied from the last line to the first so earlier line numbers
-stay valid. Only `not_found` errors are ever flagged; `--dry-run` prints the intended edits.
+stay valid. Only error-severity `not_found` results are ever flagged (never a `near_miss`, even
+under `--strict`, which fails the run for it); `--dry-run` prints the intended edits.
 
 `cascade_flag.py` cannot be reused as is (hard-coded tag, matches by cited source, not by line, and its
 citation regex needs `(raw/…,` at the start of a parenthesis). The plan includes a refactor: extract

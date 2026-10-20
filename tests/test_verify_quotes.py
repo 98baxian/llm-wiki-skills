@@ -868,6 +868,16 @@ class TestFlag:
         assert vq.main([str(root), "--flag", "--no-cache"]) == 0
         assert "FIX" not in page_text(root)
 
+    def test_strict_near_miss_fails_the_run_but_is_never_flagged(self, tmp_path):
+        raw = {"raw/articles/a.md": "the committee approved the budget after a long and heated debate on friday\n"}
+        page = 'Said: "the committee passed the budget following lengthy argument on friday" (raw/articles/a.md, L1)\n'
+        root = flag_vault(tmp_path, page, raw)
+        report = vq.verify_wiki(root, use_cache=False, strict=True)
+        assert [r["verdict"] for r in report["results"]] == ["near_miss"]
+        assert vq.main([str(root), "--flag", "--no-cache"]) == 0
+        assert vq.main([str(root), "--flag", "--strict", "--no-cache"]) == 1
+        assert "FIX" not in page_text(root)
+
     def test_suggested_file_is_part_of_the_comment(self, tmp_path):
         raw = {"raw/articles/a.md": RAW, "raw/articles/b.md": "an entirely invented sentence about nothing\n"}
         root = flag_vault(tmp_path, PAGE_BAD, raw)
