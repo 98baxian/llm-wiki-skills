@@ -95,8 +95,32 @@ See `## Private zones` for the current list of protected paths.
 """
 
 
+def _converter_for(mineru: bool | None) -> str:
+    """converter: value for the new vault. None keeps the auto fallback chain."""
+    if mineru is None:
+        return "auto"
+    return "mineru" if mineru else "pdftotext"
+
+
+def _warn_if_mineru_missing(mineru: bool | None) -> None:
+    """The user chose MinerU explicitly; tell them now if it is not installed, since
+    ingest would otherwise be the first place the missing binary shows up."""
+    if mineru is not True:
+        return
+    import convert_source
+    if convert_source.find_mineru_kit() is None:
+        print("⚠ MinerU (mineru-kit) was not found. converter: mineru is written to CLAUDE.md, but "
+              "PDF ingest will fail until MinerU is installed (or set MINERU_KIT_BIN).")
+
+
+def _parse_yes_no(text: str) -> bool:
+    """Interactive answer to the MinerU question; empty means the recommended Yes."""
+    return text.strip().lower() not in ("n", "no", "none", "false", "0")
+
+
 def scaffold(root: str, title: str, domains: list[str], lang: str,
-             primary_lang: str = "English", private_zones: list[str] = None) -> None:
+             primary_lang: str = "English", private_zones: list[str] = None,
+             mineru: bool | None = None) -> None:
     """Create the full wiki directory tree and initial files."""
     today = date.today()
     today_iso = today.isoformat()
@@ -157,6 +181,8 @@ def scaffold(root: str, title: str, domains: list[str], lang: str,
         lang_note = primary_display
         bilingual_block = ""
     private_block = _private_zones_block(private_zones)
+    converter_line = f"converter: {_converter_for(mineru)}".ljust(23)
+    _warn_if_mineru_missing(mineru)
     # ── CLAUDE.md (single config + schema file) ───────────────────────────────
     domains_bullets = "\n".join(f"- {d.strip()}" for d in domains)
 
@@ -205,14 +231,14 @@ PDFs in `raw/pdfs/` are converted once, at ingest, into line-citable markdown un
 `raw/converted/<slug>/` (script-written, never edit by hand). Cite the converted markdown,
 e.g. `(raw/converted/<slug>/<slug>.md, L14-22)`; `<slug>.pages.json` translates lines back to PDF pages.
 
-converter: auto        # auto | mineru | pdftotext | command | none
+{converter_line}# auto | mineru | pdftotext | command | none
 tier: basic            # MinerU tier: flash | basic | standard | advanced (standard/advanced use the GPU)
 timeout: 900           # seconds per file
 command: ""            # converter: command -> "mytool {{input}} {{outdir}}"; must write {{outdir}}/<slug>.md
 
 `auto` tries your `command`, then local MinerU (`mineru-kit`), then `pdftotext` (lossy, text-layer
 PDFs only). Set `converter: none` to turn conversion off. Documents are never uploaded: the remote
-MinerU service is not used.
+MinerU service is not used. The `converter:` line was set when this vault was scaffolded; edit it to change converter.
 
 ## Current articles
 
@@ -680,6 +706,9 @@ def main() -> None:
     parser.add_argument("--private-zones", type=str, default=None,
                         help='Comma-separated private-zone folders the agent NEVER reads directly '
                              '(sensitive data; pipeline-only access). Pass "" for none. Example: "private_zone"')
+    parser.add_argument("--mineru", choices=["yes", "no"], default=None,
+                        help="Use local MinerU for PDF conversion (yes -> converter: mineru, "
+                             "no -> converter: pdftotext). Omit to be asked.")
     args = parser.parse_args()
 
     # ── Interactive fallback ──────────────────────────────────────────────────
@@ -728,8 +757,16 @@ def main() -> None:
             private_zones_str = ""
     private_zones = [z.strip() for z in (private_zones_str or "").split(",") if z.strip()]
 
+    if args.mineru is None:
+        print("\nEnable MinerU for PDF conversion? (powerful local parser: tables, formulas, scanned pages;")
+        print("heavier than pdftotext, runs locally, never uploads documents)")
+        print("Options: yes (recommended) · no (pdftotext only: text-layer PDFs)")
+        mineru = _parse_yes_no(input("> "))
+    else:
+        mineru = args.mineru == "yes"
+
     scaffold(args.wiki_root, title, domains, lang, primary_lang=primary_lang,
-             private_zones=private_zones)
+             private_zones=private_zones, mineru=mineru)
 
 
 if __name__ == "__main__":

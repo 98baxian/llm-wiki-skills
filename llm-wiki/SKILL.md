@@ -79,7 +79,7 @@ Execute in this order at the start of every session:
    If qmd is not configured, skip silently.
 
 If the wiki has not been scaffolded yet (no `CLAUDE.md`):
-Read `references/scaffold-wizard.md` — run the three-question setup interview,
+Read `references/scaffold-wizard.md` — run the setup interview,
 then execute the scaffold script as directed there.
 
 ## Directory layout
@@ -240,10 +240,10 @@ python3 .claude/skills/llm-wiki/scripts/scaffold.py <wiki-root> "<Topic Title>" 
   --domains "AI,Finance" --primary-lang zh --lang en --private-zones ""
 ```
 
-The setup interview (see `references/scaffold-wizard.md`) asks five things: **domains**;
+The setup interview (see `references/scaffold-wizard.md`) asks six things: **domains**;
 the **primary language** (it leads in titles/headings); an optional **secondary
 language** (annotated in parens — this makes the vault bilingual; pass `--lang no` for
-monolingual); whether to enable **semantic search**; and whether you need a **private
+monolingual); whether to enable **MinerU** for PDF conversion (`--mineru yes|no`); whether to enable **semantic search**; and whether you need a **private
 zone**. The primary/secondary answers are recorded in `CLAUDE.md` — the `## Notes →
 Language` line *and* a generated `### Bilingual format` block under Naming conventions
 that states which language leads and shows a worked example. **The skill itself stays
@@ -600,7 +600,7 @@ knowledge — clearly distinguishing between the two.
 - `references/log-guide.md` — log/ folder convention, allowed operations
 - `references/audit-guide.md` — audit file format, anchor strategy, inline FIX comments, processing workflow
 - `references/tooling-tips.md` — qmd setup, Obsidian config, web viewer
-- `references/scaffold-wizard.md` — first-time setup interview (Questions 1–4: domains, primary language, secondary language, semantic search + scaffold command)
+- `references/scaffold-wizard.md` — first-time setup interview (Questions 1–6: domains, primary language, secondary language, private zone, MinerU PDF conversion, semantic search + scaffold command)
 - `references/ops/op-ingest.md` — full ingest step-by-step (also used by `save` and stub-filling in `batch_ingest`)
 - `references/ops/op-query.md` — full query navigation + output formats
 - `references/ops/op-lint.md` — full lint post-run playbook + deep lint
