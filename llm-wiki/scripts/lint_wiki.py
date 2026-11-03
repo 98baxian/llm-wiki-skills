@@ -42,7 +42,10 @@ import argparse
 from pathlib import Path
 from collections import defaultdict
 
+import citations
+import schema
 import textnorm
+from vault_config import in_private_zone
 
 
 # ── Constants ─────────────────────────────────────────────────────────────────
@@ -51,7 +54,7 @@ SYSTEM_FILES = {"index.md", "log.md", "overview.md", "QUESTIONS.md", "hot.md"}
 WIKILINK_RE = re.compile(r"\[\[([^\]|#]+)(?:[|#][^\]]*)?]]")
 LOG_FILENAME_RE = re.compile(r"^(\d{4})(\d{2})(\d{2})\.md$")
 FRONTMATTER_RE = re.compile(r"^---\n(.*?)\n---\n", re.DOTALL)
-CITATION_RE = re.compile(r"\(raw/[^)]+,\s*(L\d|p\.\d)|location unknown\)|\[synthesis\]")
+CITATION_RE = re.compile(r"\(raw/[^)]+,\s*(L\d|p\.\d)|\(raw/[^)\s,]+#[A-Za-z0-9][\w-]*\)|location unknown\)|\[synthesis\]")
 FACTUAL_LINE_RE = re.compile(r"^[-•]\s.{50,}$|^\d+\.\s.{50,}$")
 # A source-page wikilink used as an inline citation, e.g. "([[sources/foo]], L10)".
 # Citations must point to raw/ evidence, not a compiled summary page (see check 14).
@@ -603,6 +606,140 @@ def check_duplicate_list_entries(wiki_dir: Path, root: Path) -> None:
                     seen.add(target)
 
 
+# ── Checks 17-19: page kinds, typed relations, citation targets ──────────────
+
+_ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+RELATION_CONFIDENCE = {"low", "medium", "high"}
+_TEXT_SUFFIXES = {".md", ".txt", ".markdown"}
+
+
+class _RawCache:
+    """Raw files read at most once per lint run; private zones are never opened."""
+
+    def __init__(self, root: Path):
+        self.root = root
+        self._lines: dict[str, list[str] | None] = {}
+
+    def lines(self, rel: str) -> list[str] | None:
+        if rel not in self._lines:
+            path = self.root / rel
+            ok = (path.is_file() and path.suffix.lower() in _TEXT_SUFFIXES
+                  and not in_private_zone(self.root, path))
+            self._lines[rel] = (path.read_text(encoding="utf-8", errors="replace").splitlines()
+                                if ok else None)
+        return self._lines[rel]
+
+
+def citation_problems(cite: "citations.Citation", cache: _RawCache) -> list[tuple[str, str]]:
+    """Why a citation does not resolve, as ``(level, message)``. A missing or ambiguous anchor is an
+    ERROR; a missing raw file or a line past the end is a WARNING (older vaults cite both).
+
+    Binary raw files, private zones and page locations (``p.12``) are not checked."""
+    lines = cache.lines(cite.raw)
+    if lines is None:
+        if (cache.root / cite.raw).is_file():
+            return []
+        return [("WARNING", f"{cite.raw} does not exist")]
+    problems = []
+    anchors = None
+    for loc in cite.locs:
+        if loc[0] == "anchor":
+            if anchors is None:
+                anchors = citations.anchor_lines("\n".join(lines))
+            hits = anchors.get(loc[1], [])
+            if not hits:
+                problems.append(("ERROR", f"anchor #{loc[1]} not found in {cite.raw}"))
+            elif len(hits) > 1:
+                problems.append(("ERROR", f"anchor #{loc[1]} is ambiguous in {cite.raw} (lines "
+                                          f"{', '.join(map(str, hits))})"))
+        elif loc[0] == "L" and loc[2] > len(lines):
+            problems.append(("WARNING", f"L{loc[1]}-{loc[2]} is past the end of {cite.raw} "
+                                        f"({len(lines)} lines)"))
+    return problems
+
+
+def check_page_kinds(wiki_dir: Path, root: Path) -> None:
+    """Pages with ``kind:`` must match a kind declared under ``## Page types`` in CLAUDE.md."""
+    kinds = schema.load_page_types(root)
+    if not kinds:
+        return
+    for f in wiki_files(wiki_dir):
+        fm, _ = parse_frontmatter(f)
+        kind = fm.get("kind", "")
+        if not kind:
+            continue
+        rel = f.relative_to(root)
+        spec = kinds.get(kind)
+        if spec is None:
+            log_issue("WARNING", "page-kind",
+                      f"{rel} — kind '{kind}' is not declared under '## Page types' "
+                      f"(declared: {', '.join(sorted(kinds))})")
+            continue
+        top = f.relative_to(wiki_dir).parts[0]
+        if spec["dir"] and top != spec["dir"]:
+            log_issue("WARNING", "page-kind",
+                      f"{rel} — kind '{kind}' belongs in wiki/{spec['dir']}/, found in wiki/{top}/")
+        for field in spec["required"]:
+            if not fm.get(field):
+                log_issue("ERROR", "page-kind", f"{rel} — kind '{kind}' requires '{field}'")
+        for field, allowed in spec["enum"].items():
+            value = fm.get(field)
+            if value and value not in allowed:
+                log_issue("ERROR", "page-kind",
+                          f"{rel} — {field}: '{value}' is not one of {'|'.join(allowed)}")
+
+
+def check_relations(wiki_dir: Path, root: Path) -> None:
+    """Typed ``relations:`` edges: shape, vocabulary, resolvable target, resolvable evidence."""
+    vocab = schema.load_relation_types(root)
+    resolvable = {f.relative_to(wiki_dir).with_suffix("").as_posix() for f in wiki_dir.rglob("*.md")}
+    cache = _RawCache(root)
+    for f in wiki_files(wiki_dir):
+        relations, bad = schema.parse_relations(f)
+        rel_path = f.relative_to(root)
+        for text in bad:
+            log_issue("WARNING", "relations",
+                      f"{rel_path} — unparseable relation (expected a one-line {{key: value, ...}}): {text[:70]}")
+        for rel in relations:
+            label = f"{rel_path} — relation {rel.get('type', '?')} → {rel.get('target', '?')}"
+            kind, target = rel.get("type", ""), rel.get("target", "")
+            if not kind or not target:
+                log_issue("ERROR", "relations", f"{label}: needs both 'type' and 'target'")
+                continue
+            if vocab and kind not in vocab:
+                log_issue("WARNING", "relations",
+                          f"{label}: type '{kind}' is not under '## Relation types' ({', '.join(sorted(vocab))})")
+            bare = target.strip("[]").split("|")[0].split("#")[0].strip()
+            if not schema.is_external_id(bare) and bare not in resolvable:
+                log_issue("ERROR", "relations", f"{label}: target does not exist")
+            if rel.get("confidence") and rel["confidence"] not in RELATION_CONFIDENCE:
+                log_issue("WARNING", "relations", f"{label}: confidence must be low|medium|high")
+            if rel.get("as_of") and not _ISO_DATE_RE.match(rel["as_of"]):
+                log_issue("WARNING", "relations", f"{label}: as_of must be YYYY-MM-DD")
+            evidence = rel.get("evidence", "")
+            if not evidence:
+                log_issue("WARNING", "relations", f"{label}: no evidence")
+                continue
+            cites = citations.find_citations(evidence)
+            if not cites:
+                log_issue("WARNING", "relations",
+                          f"{label}: evidence '{evidence}' is not a raw citation (raw/x.md#id or raw/x.md, L12)")
+            for cite in cites:
+                for _, problem in citation_problems(cite, cache):
+                    log_issue("ERROR", "relations", f"{label}: evidence {problem}")
+
+
+def check_citation_targets(wiki_dir: Path, root: Path) -> None:
+    """Every inline raw citation: the file exists, an anchor exists once, lines are not past the end."""
+    cache = _RawCache(root)
+    for f in wiki_files(wiki_dir):
+        _, body = parse_frontmatter(f)
+        for line in body.splitlines():
+            for cite in citations.find_citations(line):
+                for level, problem in citation_problems(cite, cache):
+                    log_issue(level, "citation-target", f"{f.relative_to(root)} — {problem}")
+
+
 # ── Check 16: Quote Verification (opt-in: --verify-quotes) ───────────────────
 
 UNVERIFIABLE_SHARE_WARNING = 0.10
@@ -708,10 +845,13 @@ def lint(root: str, structural: bool = False, verify_quotes: bool = False) -> in
     check_claims_verification(wiki_path, root_path)
     check_wikilink_citations(wiki_path, root_path)
     check_duplicate_list_entries(wiki_path, root_path)
+    check_page_kinds(wiki_path, root_path)
+    check_relations(wiki_path, root_path)
+    check_citation_targets(wiki_path, root_path)
     if verify_quotes:
         check_quote_verification(root_path)
 
-    checks_run = "10 (structural)" if structural else "15+ (full)"
+    checks_run = "10 (structural)" if structural else "18+ (full)"
     report_path = outputs_path / f"lint-{TODAY_ISO}.md"
 
     lines = [

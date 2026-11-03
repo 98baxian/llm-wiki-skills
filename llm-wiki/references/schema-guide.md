@@ -281,6 +281,46 @@ Applies to: `wiki/index.md`, `wiki/index/*.md`, `wiki/overview.md`,
 
 ---
 
+## Domain extensions — page kinds, typed relations, anchors
+
+Optional. A vault that declares none of this behaves exactly as before. Checks 17-19 of
+`lint_wiki.py` enforce it; `export_graph.py` exports it.
+
+**Page kinds.** `type:` stays one of the built-in page types. Add a finer `kind:` to a page and
+declare what each kind must carry in the vault `CLAUDE.md`:
+
+```markdown
+## Page types
+- variant: dir=concepts; required=hgvs_c,acmg_class; enum.acmg_class=Pathogenic|VUS|Benign
+- gene: dir=entities; required=gene_symbol
+```
+
+`dir` is the `wiki/` subfolder the kind belongs in (WARNING if not), `required` fields must be
+non-empty (ERROR), `enum.<field>` lists the allowed values (ERROR). A `kind:` that is not declared
+is a WARNING, which catches typos.
+
+**Typed relations.** A page lists evidenced edges in its frontmatter, one flow mapping per line:
+
+```yaml
+relations:
+  - {type: treats, target: entities/drug-x, evidence: "raw/lit/p1.md#ev-3", confidence: high, as_of: 2026-11-01}
+  - {type: associated_with, target: "mondo:0005148", evidence: "raw/lit/p2.md, L14-16"}
+```
+
+`target` is a wiki page (`category/stem`, ERROR if missing) or an external id with a prefix
+(`mondo:0005148`, `drugbank:DB00945`), which is not resolved, so a wiki edge can name a node of a
+graph database. `evidence` is a raw citation that must resolve (ERROR if the file, anchor or line
+is missing; WARNING if absent). `confidence` is `low|medium|high`; `as_of` is `YYYY-MM-DD`. Allowed
+`type` names are the bullets under `## Relation types` in `CLAUDE.md`; without that section any
+name is accepted. `python3 scripts/export_graph.py <wiki-root> [--wikilinks]` writes
+`outputs/graph.json` (nodes, edges) for a graph database.
+
+**Stable anchors.** A raw file marks a place with a block id at the end of a line (Obsidian
+syntax): `PVS1 fires ^ev-pvs1`. A page cites it as `(raw/cases/x.md#ev-pvs1)`. Unlike `L73-77`, the
+citation stays valid when the raw file is regenerated and its lines move. Check 19 reports an
+anchor that is missing or defined on more than one line (ERROR), a raw file that does not exist,
+and an `L` range past the end of the file (WARNING). Private zones are never opened.
+
 ## Forbidden wikilink targets
 
 - System files: `[[log]]` `[[index]]` `[[overview]]` `[[QUESTIONS]]`

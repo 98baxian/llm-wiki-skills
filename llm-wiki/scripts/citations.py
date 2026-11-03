@@ -6,6 +6,10 @@ A citation is ``raw/<path>.<ext>`` followed by one or more locations::
     (raw/x.md, L61-62, L91)               (raw/x.md, p.12-13)       (raw/x.md, location unknown)
     (raw/a.md, L9; raw/b.md, L13)         several sources in one parenthesis
 
+A citation can also name a stable anchor instead of lines: ``(raw/cases/x.md#ev-pvs1)``. The anchor
+is a block id written at the end of a raw line (``... text ^ev-pvs1``, Obsidian block-id syntax), so it
+survives a regenerated raw file whose line numbers move; ``anchor_lines`` maps ids to line numbers.
+
 Tolerated: ``P.3``, an en dash for ranges, a full-width comma, extra spaces, commas and
 parentheses inside the file name, CJK and spaces in the path.
 """
@@ -24,6 +28,9 @@ _SEP = r"\s*[,，;；/]\s*"
 # the path may hold anything except a newline or the start of another citation
 _PATH = r"raw/(?:(?!\(raw/)[^\n])*?\.[A-Za-z0-9]{1,8}"
 CITE_RE = re.compile(rf"({_PATH})\s*[,，]\s*({_LOC}(?:{_SEP}{_LOC})*)")
+_ANCHOR = r"[A-Za-z0-9][\w-]*"
+CITE_ANCHOR_RE = re.compile(rf"({_PATH})#({_ANCHOR})")
+_ANCHOR_LINE_RE = re.compile(rf"(?:^|\s)\^({_ANCHOR})\s*$")
 _LOC_PIECE = re.compile(
     r"[Ll](\d+)(?:\s*[-–—]\s*[Ll]?(\d+))?|[Pp]\.\s*(\d+)(?:\s*[-–—]\s*(\d+))?|location unknown"
 )
@@ -32,7 +39,7 @@ _LOC_PIECE = re.compile(
 @dataclass(frozen=True)
 class Citation:
     raw: str                 # "raw/articles/x.md"
-    locs: tuple              # (("L", 14, 22), ("p", 12, 12), ("unknown",))
+    locs: tuple              # (("L", 14, 22), ("p", 12, 12), ("unknown",), ("anchor", "ev-pvs1"))
     start: int               # span of "<path>, <locations>" inside the line
     end: int
 
@@ -52,10 +59,27 @@ def parse_locs(text: str) -> tuple:
 
 
 def find_citations(line: str) -> list[Citation]:
-    return [
+    found = [
         Citation(m.group(1).strip(), parse_locs(m.group(2)), m.start(), m.end())
         for m in CITE_RE.finditer(line)
     ]
+    taken = [(c.start, c.end) for c in found]
+    for m in CITE_ANCHOR_RE.finditer(line):
+        if not any(a < m.end() and m.start() < b for a, b in taken):
+            found.append(Citation(m.group(1).strip(), (("anchor", m.group(2)),), m.start(), m.end()))
+    return sorted(found, key=lambda c: c.start)
+
+
+def anchor_lines(text: str) -> dict[str, list[int]]:
+    """Map each block id (``^id`` ending a line) to the 1-based lines that carry it.
+
+    More than one line per id means the anchor is ambiguous."""
+    out: dict[str, list[int]] = {}
+    for n, line in enumerate(text.splitlines(), 1):
+        m = _ANCHOR_LINE_RE.search(line)
+        if m:
+            out.setdefault(m.group(1), []).append(n)
+    return out
 
 
 def malformed(line: str) -> list[str]:

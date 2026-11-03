@@ -32,6 +32,8 @@ def format_locs(locs: tuple) -> str:
             parts.append(f"L{loc[1]}" if loc[1] == loc[2] else f"L{loc[1]}-{loc[2]}")
         elif loc[0] == "p":
             parts.append(f"p.{loc[1]}" if loc[1] == loc[2] else f"p.{loc[1]}-{loc[2]}")
+        elif loc[0] == "anchor":
+            parts.append(f"#{loc[1]}")
         else:
             parts.append("location unknown")
     return ", ".join(parts)

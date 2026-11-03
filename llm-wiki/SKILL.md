@@ -400,7 +400,7 @@ detail are in `references/ops/op-query.md`.**
 **Trigger words:** lint, health check, check wiki
 
 ```bash
-python3 .claude/skills/llm-wiki/scripts/lint_wiki.py <wiki-root>   # 13+ checks → outputs/lint-YYYY-MM-DD.md
+python3 .claude/skills/llm-wiki/scripts/lint_wiki.py <wiki-root>   # 18+ checks → outputs/lint-YYYY-MM-DD.md
 ```
 Flags: `--stale-only` (fast; used at session start), `--structural` (skip the
 uncited-claims check on large wikis), `--verify-quotes` (also check that quoted passages occur
@@ -599,6 +599,7 @@ knowledge — clearly distinguishing between the two.
 - `references/article-guide.md` — line-level tracing, confidence gating, divide-and-conquer, extraction rules, secondary language annotation
 - `references/log-guide.md` — log/ folder convention, allowed operations
 - `references/audit-guide.md` — audit file format, anchor strategy, inline FIX comments, processing workflow
+- `references/schema-guide.md` § Domain extensions — optional page `kind:`, typed `relations:` (`export_graph.py`) and stable `#anchor` citations
 - `references/tooling-tips.md` — qmd setup, Obsidian config, web viewer
 - `references/scaffold-wizard.md` — first-time setup interview (Questions 1–6: domains, primary language, secondary language, private zone, MinerU PDF conversion, semantic search + scaffold command)
 - `references/ops/op-ingest.md` — full ingest step-by-step (also used by `save` and stub-filling in `batch_ingest`)
