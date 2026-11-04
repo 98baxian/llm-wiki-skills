@@ -13,12 +13,22 @@ Example:
 
 Creates the full wiki directory tree including CLAUDE.md (the single config +
 schema file), wiki/index.md, all templates, log/, audit/, and the first log entry.
+
+Skill placement (<wiki-root>/.claude/skills/llm-wiki/):
+    default            copy the skill into the vault — self-contained and portable
+    --link-skill       symlink to the skill this scaffold.py belongs to (resolved)
+    --link-skill PATH  symlink to the skill folder at PATH (must contain SKILL.md)
+A linked vault follows one shared install: update it once (e.g. git pull) and every
+linked vault sees the change, with no sync step. The link is an absolute path on this
+machine, so a linked vault is not portable. An existing symlink is never written
+through, and an existing real copy is never deleted.
 """
 
 import os
 import sys
 import argparse
 from datetime import date, datetime
+from pathlib import Path
 
 
 _LANG_NAMES = {
@@ -120,8 +130,13 @@ def _parse_yes_no(text: str) -> bool:
 
 def scaffold(root: str, title: str, domains: list[str], lang: str,
              primary_lang: str = "English", private_zones: list[str] = None,
-             mineru: bool | None = None) -> None:
-    """Create the full wiki directory tree and initial files."""
+             mineru: bool | None = None, link_skill: str | None = None) -> None:
+    """Create the full wiki directory tree and initial files.
+
+    link_skill: None copies the skill into the vault (default); "" symlinks to the
+    skill this script belongs to; a path symlinks to that skill folder. An invalid
+    link target raises ValueError before anything is written."""
+    link_target = None if link_skill is None else _link_target(link_skill)
     today = date.today()
     today_iso = today.isoformat()
     today_compact = today.strftime("%Y%m%d")
@@ -411,16 +426,25 @@ updated: {today_iso}
     _write(root, f"log/{today_compact}.md", log_md)
     print(f"✓ Created log/{today_compact}.md")
 
-    # ── Bundle the llm-wiki skill into the vault (always) ─────────────────────
-    _bundle_skill(root)
+    # ── Place the llm-wiki skill in the vault (copy, or symlink with --link-skill)
+    placement = _bundle_skill(root, link_to=link_target)
     script_prefix = ".claude/skills/llm-wiki/scripts"
+    if placement == "linked":
+        skill_note = (f"The llm-wiki skill is linked into this vault: .claude/skills/llm-wiki →\n"
+                      f"{link_target}\nUpdate that install once and every linked vault follows. The "
+                      f"link is specific to this\nmachine — re-link after moving the vault elsewhere.")
+    elif placement == "copied":
+        skill_note = ("The llm-wiki skill is bundled into this vault at .claude/skills/llm-wiki/, so the\n"
+                      "vault is self-contained and portable — the commands below resolve locally.")
+    else:
+        skill_note = ("The llm-wiki skill was NOT placed at .claude/skills/llm-wiki/ (see the message\n"
+                      "above) — the commands below need it there.")
 
     # ── Final summary ─────────────────────────────────────────────────────────
     print(f"""
 ✅ Wiki scaffolded at: {root}/
 
-The llm-wiki skill is bundled into this vault at .claude/skills/llm-wiki/, so the
-vault is self-contained and portable — the commands below resolve locally.
+{skill_note}
 
 Next steps:
   1. Review and customize CLAUDE.md — define scope and naming conventions
@@ -652,24 +676,74 @@ confidence: low
 """)
 
 
-def _bundle_skill(root: str) -> None:
-    """Copy the entire llm-wiki skill into <root>/.claude/skills/llm-wiki/ so the new
-    vault is self-contained: its documented `.claude/skills/llm-wiki/scripts/...`
-    commands resolve locally and the vault stays portable (move/share/clone it and it
-    works). Always runs at scaffold time.
+def _link_target(link_skill: str) -> Path:
+    """Resolve a --link-skill value ("" = the skill this script belongs to) to an
+    absolute skill folder. Raises ValueError unless it holds a SKILL.md."""
+    target = (Path(link_skill).expanduser() if link_skill
+              else Path(__file__).resolve().parent.parent).resolve()
+    if not (target / "SKILL.md").is_file():
+        raise ValueError(f"--link-skill target {target} is not a skill folder (no SKILL.md)")
+    return target
+
+
+def _bundle_skill(root: str, link_to: Path | None = None) -> str:
+    """Place the llm-wiki skill at <root>/.claude/skills/llm-wiki/.
+
+    link_to=None copies the whole skill into the vault, so the vault is self-contained:
+    its documented `.claude/skills/llm-wiki/scripts/...` commands resolve locally and
+    it stays portable (move/share/clone it and it works). With link_to, a symlink to
+    that skill folder is created instead, so every linked vault follows one install.
+
+    Never writes through an existing symlink (that would overwrite the install it
+    points at) and never deletes an existing real copy:
+      copy mode, symlink present  → left alone
+      link mode, real dir present → left alone (move it out of .claude/skills/ first)
+      link mode, symlink present  → repointed (a link holds no data)
+    Returns "copied", "linked" or "skipped".
     """
     import shutil
-    from pathlib import Path
 
     skill_src = Path(__file__).resolve().parent.parent            # <skill-root>/scripts/ → <skill-root>
     skill_dst = Path(root).resolve() / ".claude" / "skills" / "llm-wiki"
 
+    if link_to is not None:
+        if skill_dst.is_symlink():
+            old = skill_dst.resolve()
+            if old == link_to:
+                print(f"  → .claude/skills/llm-wiki already links to {link_to}")
+                return "linked"
+            skill_dst.unlink()
+            skill_dst.symlink_to(link_to, target_is_directory=True)
+            print(f"✓ Repointed .claude/skills/llm-wiki → {link_to} (was → {old})")
+            return "linked"
+        if skill_dst.exists():
+            if skill_dst.resolve() == link_to:
+                print("  → llm-wiki skill already lives at the vault path; nothing to link")
+                return "copied"
+            print(f"  ⚠ .claude/skills/llm-wiki is a real copy; not replacing it with a link.\n"
+                  f"    Move it OUT of .claude/skills/ (a backup left there would load as a\n"
+                  f"    second llm-wiki skill), then link it by hand:\n"
+                  f"    ln -s {link_to} {skill_dst}")
+            return "skipped"
+        skill_dst.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            skill_dst.symlink_to(link_to, target_is_directory=True)
+        except OSError as e:                                       # e.g. no symlink privilege on Windows
+            print(f"  ⚠ could not create the symlink ({e}); re-run without --link-skill to copy")
+            return "skipped"
+        print(f"✓ Linked .claude/skills/llm-wiki → {link_to}")
+        return "linked"
+
+    if skill_dst.is_symlink():
+        print(f"  → .claude/skills/llm-wiki is a symlink → {skill_dst.resolve()}; not copying\n"
+              f"    through it. Remove the link first if you want a bundled copy.")
+        return "linked" if skill_dst.resolve() == skill_src else "skipped"
     if skill_src == skill_dst:
         print("  → llm-wiki skill already lives at the vault path; not re-copying")
-        return
+        return "copied"
     if skill_dst.is_relative_to(skill_src) or skill_src.is_relative_to(skill_dst):
         print("  ⚠ skill source and vault path overlap; skipping bundle to avoid recursion")
-        return
+        return "skipped"
 
     skill_dst.parent.mkdir(parents=True, exist_ok=True)
     shutil.copytree(
@@ -678,6 +752,7 @@ def _bundle_skill(root: str) -> None:
         dirs_exist_ok=True,
     )
     print("✓ Bundled llm-wiki skill → .claude/skills/llm-wiki/ (SKILL.md + references/ + scripts/)")
+    return "copied"
 
 
 def _write(root: str, path: str, content: str) -> None:
@@ -709,7 +784,17 @@ def main() -> None:
     parser.add_argument("--mineru", choices=["yes", "no"], default=None,
                         help="Use local MinerU for PDF conversion (yes -> converter: mineru, "
                              "no -> converter: pdftotext). Omit to be asked.")
+    parser.add_argument("--link-skill", nargs="?", const="", default=None, metavar="PATH",
+                        help="Symlink .claude/skills/llm-wiki to a shared skill install instead of "
+                             "copying it: to PATH, or with no PATH to the skill this script belongs to. "
+                             "No sync step after updates, but the vault is no longer portable.")
     args = parser.parse_args()
+    if args.link_skill is not None:
+        try:
+            _link_target(args.link_skill)
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(2)
 
     # ── Interactive fallback ──────────────────────────────────────────────────
     title = args.title
@@ -766,7 +851,7 @@ def main() -> None:
         mineru = args.mineru == "yes"
 
     scaffold(args.wiki_root, title, domains, lang, primary_lang=primary_lang,
-             private_zones=private_zones, mineru=mineru)
+             private_zones=private_zones, mineru=mineru, link_skill=args.link_skill)
 
 
 if __name__ == "__main__":

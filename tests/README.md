@@ -33,4 +33,5 @@ pytest                    # from the repo root
 | `test_lint_lifecycle.py` | `lint_wiki.py`, `build_index.py` | checks 6 / 17 / 18: `stale_after` expiry, `superseded_by` targets, chains and cycles, two-sided Contradictions entries, the Open Contradictions report section, superseded pages in the index |
 | `test_lint_verify_quotes.py` | `lint_wiki.py` | `--verify-quotes` level mapping; default run unchanged |
 | `test_verify_quotes_slow.py` | `verify_quotes.py` | 1 MB performance guard; opt-in pass over a vault copy (`VQ_REAL_VAULT`), `-m slow` |
+| `test_scaffold_link.py` | `scaffold.py` | `--link-skill` symlink vs default copy; re-scaffolding a linked vault never writes through the link; an existing copy is never replaced; bad targets fail before anything is written |
 | `test_scaffold_and_hot.py` | `scaffold.py`, `lint_wiki.py` | scaffold structure, `hot.md` frontmatter, and the regression guard that lint treats `hot.md` as a system file (never an orphan/stale page) |
