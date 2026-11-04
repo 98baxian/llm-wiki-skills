@@ -17,7 +17,8 @@ Checks:
   3. Index consistency    — wiki pages not listed in wiki/index.md
   4. Stub pages           — articles under 80 words
   5. SHA-256 integrity    — raw file modified since ingest
-  6. Stale pages          — last reviewed beyond domain_volatility threshold
+  6. Stale pages          — concept last reviewed beyond domain_volatility threshold,
+                            or any page past its stale_after date (superseded pages skipped)
   7. Orphan pages         — wiki pages with no inbound wikilinks
   8. Near-duplicate names — concept slugs with Jaccard > 0.7
   9. Uncited claims       — factual sentences without (raw/..., Lxx) or [synthesis]
@@ -27,11 +28,16 @@ Checks:
  13. Claims verification  — verbatim strings in claims_requiring_verification exist in raw source
  14. Citation format      — inline ([[sources/...]], Lxx) citations that should point to raw/
  15. Duplicate list links — a wikilink repeated in a Concepts/Entities Extracted or Sources section
+ 16. Quote verification   — quoted passages occur in the cited raw file (opt-in: --verify-quotes)
+ 17. Supersession         — superseded_by targets exist; no self-links, cycles or chains
+ 18. Contradictions       — every Contradictions entry cites both sides; open ones are listed
 
 Exit codes:
   0 — no issues found
   1 — issues found
 """
+
+from __future__ import annotations
 
 import re
 import sys
@@ -42,7 +48,9 @@ import argparse
 from pathlib import Path
 from collections import defaultdict
 
+import citations
 import textnorm
+import vault_config
 
 
 # ── Constants ─────────────────────────────────────────────────────────────────
@@ -69,6 +77,18 @@ AUDIT_REQUIRED_FIELDS = {
 VALID_SEVERITIES = {"info", "suggest", "warn", "error"}
 VALID_STATUSES = {"open", "resolved"}
 VALID_SOURCES = {"obsidian-plugin", "web-viewer", "manual"}
+
+# Lifecycle fields (optional on any page; see schema-guide § Lifecycle fields).
+FM_TRAILING_COMMENT_RE = re.compile(r"\s+#.*$")
+# Contradictions sections (check 18).
+HEADING_RE = re.compile(r"^(#{1,6})\s+(.*)$")
+LIST_ITEM_RE = re.compile(r"^(?:[-*+]|\d+[.)])\s+")
+TABLE_SEPARATOR_RE = re.compile(r"^\|?[\s:|-]+\|?$")
+SOURCE_LINK_RE = re.compile(r"\[\[\s*(sources/[^\]|#]+)")
+CONTRADICTION_PLACEHOLDERS = {
+    "none", "none.", "(none)", "*(none)*", "_none_", "none yet", "(none yet)", "*(none yet)*",
+    "n/a", "-", "—", "无", "无。", "暂无",
+}
 
 TODAY = datetime.date.today()
 TODAY_ISO = TODAY.isoformat()
@@ -153,6 +173,88 @@ def load_staleness_thresholds(root: Path) -> dict[str, int]:
     return {"high": 90, "medium": 180, "low": 365}
 
 
+def fm_scalar(fm: dict, key: str) -> str:
+    """A frontmatter scalar without a trailing ``# comment`` or surrounding quotes."""
+    return FM_TRAILING_COMMENT_RE.sub("", fm.get(key, "")).strip().strip("\"'").strip()
+
+
+def page_ref(value: str) -> str:
+    """Normalize a page reference — ``[[concepts/x|X]]``, ``wiki/concepts/x.md``,
+    ``concepts/x`` or a bare ``x`` — to ``concepts/x`` / ``x``."""
+    v = value.strip().strip("\"'").strip()
+    if v.startswith("[[") and v.endswith("]]"):
+        v = v[2:-2]
+    v = v.split("|")[0].split("#")[0].strip()
+    if v.startswith("wiki/"):
+        v = v[len("wiki/"):]
+    if v.endswith(".md"):
+        v = v[:-3]
+    return v.strip("/")
+
+
+def page_catalog(wiki_dir: Path) -> tuple[dict[str, Path], dict[str, list[str]]]:
+    """Wiki pages keyed by ``category/stem``, plus stem → [category/stem, ...]."""
+    by_rel: dict[str, Path] = {}
+    by_stem: dict[str, list[str]] = defaultdict(list)
+    for f in wiki_files(wiki_dir):
+        rel = f.relative_to(wiki_dir).with_suffix("").as_posix()
+        by_rel[rel] = f
+        by_stem[f.stem].append(rel)
+    return by_rel, by_stem
+
+
+def resolve_page(ref: str, by_rel: dict[str, Path],
+                 by_stem: dict[str, list[str]]) -> tuple[str | None, str]:
+    """Resolve a normalized reference. Returns (category/stem, problem) where problem
+    is "" (resolved), "missing" or "ambiguous" (a bare stem that lives in several places)."""
+    if ref in by_rel:
+        return ref, ""
+    if "/" not in ref:
+        hits = by_stem.get(ref, [])
+        if len(hits) == 1:
+            return hits[0], ""
+        if len(hits) > 1:
+            return None, "ambiguous"
+    return None, "missing"
+
+
+def collect_stale(wiki_dir: Path, root: Path,
+                  thresholds: dict[str, int]) -> list[tuple[str, int, str, str]]:
+    """Every stale page as (path relative to root, days, kind, detail).
+
+    kind "review":      a concept whose last review is older than its domain_volatility
+                        limit — days = days since review, detail = the volatility tier.
+    kind "stale_after": any page whose stale_after date has passed — days = days past
+                        the date, detail = the date.
+    Pages with a superseded_by are retired and never stale. An unparseable stale_after
+    is reported by check 1, not here."""
+    stale: list[tuple[str, int, str, str]] = []
+    for f in sorted(wiki_files(wiki_dir)):
+        fm, _ = parse_frontmatter(f)
+        if fm_scalar(fm, "superseded_by"):
+            continue
+        rel = str(f.relative_to(root))
+        if f.relative_to(wiki_dir).parts[0] == "concepts":
+            vol = fm.get("domain_volatility", "medium")
+            reviewed = fm.get("last_reviewed", fm.get("updated", fm.get("date", "")))
+            if reviewed:
+                try:
+                    days = (TODAY - datetime.date.fromisoformat(reviewed)).days
+                    if days > thresholds.get(vol, 180):
+                        stale.append((rel, days, "review", vol))
+                except ValueError:
+                    pass
+        expiry = fm_scalar(fm, "stale_after")
+        if expiry:
+            try:
+                days = (TODAY - datetime.date.fromisoformat(expiry)).days
+            except ValueError:
+                continue
+            if days > 0:
+                stale.append((rel, days, "stale_after", expiry))
+    return stale
+
+
 # ── Check 1: YAML Frontmatter ────────────────────────────────────────────────
 
 def check_frontmatter(wiki_dir: Path, root: Path) -> None:
@@ -186,6 +288,15 @@ def check_frontmatter(wiki_dir: Path, root: Path) -> None:
             if field not in fm:
                 log_issue("WARNING", "frontmatter",
                           f"{f.relative_to(root)} — missing '{field}'")
+
+        expiry = fm_scalar(fm, "stale_after")
+        if expiry:
+            try:
+                datetime.date.fromisoformat(expiry)
+            except ValueError:
+                log_issue("WARNING", "frontmatter",
+                          f"{f.relative_to(root)} — stale_after '{expiry}' is not a "
+                          f"YYYY-MM-DD date (ignored by the staleness check)")
 
 
 # ── Check 2: Broken Wikilinks ────────────────────────────────────────────────
@@ -325,26 +436,16 @@ def check_stale(wiki_dir: Path, root: Path,
                 thresholds: dict[str, int]) -> list[str]:
     """Return list of stale page paths (relative to root)."""
     stale: list[str] = []
-    concepts_dir = wiki_dir / "concepts"
-    if not concepts_dir.exists():
-        return stale
-    for f in concepts_dir.rglob("*.md"):
-        fm, _ = parse_frontmatter(f)
-        vol = fm.get("domain_volatility", "medium")
-        reviewed = fm.get("last_reviewed", fm.get("updated", fm.get("date", "")))
-        if not reviewed:
-            continue
-        try:
-            days = (TODAY - datetime.date.fromisoformat(reviewed)).days
-            limit = thresholds.get(vol, 180)
-            if days > limit:
-                rel = str(f.relative_to(root))
-                msg = (f"{rel} — {days}d since review "
-                       f"(limit for '{vol}': {limit}d)")
-                log_issue("WARNING", "stale", msg)
-                stale.append(rel)
-        except ValueError:
-            pass
+    for rel, days, kind, detail in collect_stale(wiki_dir, root, thresholds):
+        if kind == "review":
+            msg = (f"{rel} — {days}d since review "
+                   f"(limit for '{detail}': {thresholds.get(detail, 180)}d)")
+        else:
+            msg = (f"{rel} — past stale_after {detail} ({days}d ago); re-verify "
+                   f"against raw/ and set a new stale_after")
+        log_issue("WARNING", "stale", msg)
+        if rel not in stale:
+            stale.append(rel)
     return stale
 
 
@@ -631,10 +732,175 @@ def check_quote_verification(root: Path) -> None:
                   "(missing, PDF or unreadable raw files)")
 
 
+# ── Check 17: Supersession ───────────────────────────────────────────────────
+
+def check_supersession(wiki_dir: Path, root: Path) -> None:
+    """A page with ``superseded_by`` is retired in favour of another page. The target
+    must exist, must not be the page itself, and must be current: a chain (A → B → C)
+    should point straight at C, and a cycle leaves no current page at all."""
+    by_rel, by_stem = page_catalog(wiki_dir)
+    successor: dict[str, str] = {}
+    for rel, f in sorted(by_rel.items()):
+        fm, _ = parse_frontmatter(f)
+        value = fm_scalar(fm, "superseded_by")
+        if not value:
+            continue
+        shown = f.relative_to(root)
+        ref = page_ref(value)
+        target, problem = resolve_page(ref, by_rel, by_stem)
+        if problem == "missing":
+            log_issue("ERROR", "supersession",
+                      f"{shown} — superseded_by '{value}' does not exist")
+        elif problem == "ambiguous":
+            log_issue("WARNING", "supersession",
+                      f"{shown} — superseded_by '{value}' matches {sorted(by_stem[ref])}; "
+                      f"use the category/slug form")
+        elif target == rel:
+            log_issue("ERROR", "supersession", f"{shown} — superseded_by points to itself")
+        else:
+            successor[rel] = target
+
+    reported_cycles: set[frozenset] = set()
+    for start in sorted(successor):
+        path = [start]
+        current = successor[start]
+        while current in successor and current not in path:
+            path.append(current)
+            current = successor[current]
+        if current in path:
+            cycle = path[path.index(current):]
+            if frozenset(cycle) not in reported_cycles:
+                reported_cycles.add(frozenset(cycle))
+                chain = " → ".join(f"[[{p}]]" for p in cycle + [current])
+                log_issue("ERROR", "supersession",
+                          f"superseded_by cycle {chain} — no current page; "
+                          f"clear superseded_by on the page that should stay current")
+        elif len(path) > 1:
+            log_issue("WARNING", "supersession",
+                      f"{by_rel[start].relative_to(root)} — superseded_by [[{successor[start]}]] "
+                      f"is itself superseded; point to [[{current}]]")
+
+
+# ── Check 18: Contradictions ─────────────────────────────────────────────────
+
+def contradiction_entries(body: str) -> list[str]:
+    """The entries of a page's Contradictions section(s), one string each.
+
+    An entry is a top-level list item (indented continuation lines and nested bullets
+    folded in), a table body row, or a plain paragraph. HTML comments, table header
+    rows and placeholders ("None", "无", ...) are dropped. A heading counts as a
+    Contradictions section when its text contains "contradiction" (any case)."""
+    body = re.sub(r"<!--.*?-->", "", body, flags=re.DOTALL)
+    entries: list[list[str]] = []
+    in_section = False
+    section_level = 0
+    current: list[str] | None = None     # entry that continuation lines join
+    last_item: list[str] | None = None   # last list item, for indented lines after a blank
+    for line in body.splitlines():
+        stripped = line.strip()
+        heading = HEADING_RE.match(stripped)
+        if heading:
+            level = len(heading.group(1))
+            if in_section and level > section_level:
+                current = last_item = None         # sub-heading inside the section
+                continue
+            in_section = "contradiction" in heading.group(2).lower()
+            section_level = level
+            current = last_item = None
+            continue
+        if not in_section:
+            continue
+        if not stripped:
+            current = None
+            continue
+        indented = line[:1].isspace()
+        if stripped.startswith("|"):
+            if TABLE_SEPARATOR_RE.match(stripped):
+                if entries and entries[-1] and entries[-1][0].startswith("|"):
+                    entries.pop()                  # the row above was the header
+            else:
+                entries.append([stripped])
+            current = last_item = None
+        elif LIST_ITEM_RE.match(stripped) and not indented:
+            current = last_item = [LIST_ITEM_RE.sub("", stripped)]
+            entries.append(current)
+        elif indented and (current or last_item) is not None:
+            (current if current is not None else last_item).append(stripped)
+        elif current is not None:
+            current.append(stripped)
+        else:
+            current = [stripped]
+            last_item = None
+            entries.append(current)
+    texts = [" ".join(e).strip() for e in entries]
+    return [t for t in texts if t.lower() not in CONTRADICTION_PLACEHOLDERS]
+
+
+def contradiction_sides(entry: str, own_raw: str, source_raw: dict[str, str]) -> set[str]:
+    """Distinct evidence an entry cites: raw files in ``(raw/..., Lxx)`` citations and
+    ``[[sources/...]]`` links (mapped to their raw_file so one source never counts twice).
+    On a source-summary page the page's own raw file is one side implicitly."""
+    sides = {c.raw for c in citations.find_citations(entry)}
+    for link in SOURCE_LINK_RE.findall(entry):
+        ref = page_ref(link)
+        sides.add(source_raw.get(ref) or ref)
+    if own_raw:
+        sides.add(own_raw)
+    return sides
+
+
+def research_questions(root: Path) -> list[str]:
+    """Real bullets under CLAUDE.md ## Open research questions (placeholders skipped)."""
+    out = []
+    for line in vault_config.section_lines(root, "Open research questions"):
+        m = re.match(r"^\s*[-*]\s+(?:\[[ xX]\]\s*)?(.+)$", line)
+        if m and not re.fullmatch(r"<[^>]*>", m.group(1).strip()):
+            out.append(m.group(1).strip())
+    return out
+
+
+def check_contradictions(wiki_dir: Path, root: Path) -> list[tuple[str, int]]:
+    """Every Contradictions entry must state and cite both sides (article-guide
+    § Handling Contradictions). Returns (page, entry count) for each page with open
+    contradictions so the report can list them."""
+    files = wiki_files(wiki_dir)
+    source_raw: dict[str, str] = {}
+    for f in files:
+        rel = f.relative_to(wiki_dir).with_suffix("").as_posix()
+        if rel.startswith("sources/"):
+            fm, _ = parse_frontmatter(f)
+            if fm_scalar(fm, "raw_file"):
+                source_raw[rel] = fm_scalar(fm, "raw_file")
+
+    open_pages: list[tuple[str, int]] = []
+    for f in sorted(files):
+        fm, body = parse_frontmatter(f)
+        entries = contradiction_entries(body)
+        if not entries:
+            continue
+        rel = str(f.relative_to(root))
+        open_pages.append((rel, len(entries)))
+        own_raw = fm_scalar(fm, "raw_file") if fm_scalar(fm, "type") == "source-summary" else ""
+        for entry in entries:
+            sides = contradiction_sides(entry, own_raw, source_raw)
+            if len(sides) < 2:
+                preview = (entry[:60] + "...") if len(entry) > 60 else entry
+                log_issue("WARNING", "contradictions",
+                          f'{rel} — contradiction cites {len(sides)} side(s); state both '
+                          f'claims and cite each: "{preview}"')
+
+    if open_pages and (root / "CLAUDE.md").exists() and not research_questions(root):
+        log_issue("SUGGESTION", "contradictions",
+                  f"{len(open_pages)} page(s) record contradictions but CLAUDE.md "
+                  f"## Open research questions is empty — add them there")
+    return open_pages
+
+
 # ── Stale-Only Mode ───────────────────────────────────────────────────────────
 
 def stale_only(root: str) -> int:
-    """Fast mode: only report stale concept pages. Used by session-start routine."""
+    """Fast mode: only report stale pages (concepts past their review limit, any page
+    past its stale_after). Used by session-start routine."""
     root_path = Path(root)
     wiki_path = root_path / "wiki"
     thresholds = load_staleness_thresholds(root_path)
@@ -643,34 +909,18 @@ def stale_only(root: str) -> int:
         print(f"ERROR: wiki/ directory not found at {wiki_path}", file=sys.stderr)
         return 1
 
-    concepts_dir = wiki_path / "concepts"
-    if not concepts_dir.exists():
-        print("No concept pages found.")
-        return 0
-
-    stale: list[tuple[str, int, str]] = []
-    for f in concepts_dir.rglob("*.md"):
-        fm, _ = parse_frontmatter(f)
-        vol = fm.get("domain_volatility", "medium")
-        reviewed = fm.get("last_reviewed", fm.get("updated", fm.get("date", "")))
-        if not reviewed:
-            continue
-        try:
-            days = (TODAY - datetime.date.fromisoformat(reviewed)).days
-            limit = thresholds.get(vol, 180)
-            if days > limit:
-                stale.append((str(f.relative_to(root_path)), days, vol))
-        except ValueError:
-            continue
-
+    stale = collect_stale(wiki_path, root_path, thresholds)
     if not stale:
-        print("✓ No stale concept pages found.")
+        print("✓ No stale pages found.")
         return 0
 
-    stale.sort(key=lambda x: -x[1])
-    print(f"⚠️  {len(stale)} stale concept page(s):\n")
-    for path, days, vol in stale:
-        print(f"  {days:>4}d overdue  [{vol}]  {path}")
+    stale.sort(key=lambda x: (-x[1], x[0]))
+    print(f"⚠️  {len(stale)} stale page(s):\n")
+    for path, days, kind, detail in stale:
+        if kind == "review":
+            print(f"  {days:>4}d since review  [{detail}]  {path}")
+        else:
+            print(f"  {days:>4}d overdue  [stale_after {detail}]  {path}")
 
     print(f"\nRun full lint for all checks: python3 scripts/lint_wiki.py {root}")
     return 1
@@ -710,8 +960,10 @@ def lint(root: str, structural: bool = False, verify_quotes: bool = False) -> in
     check_duplicate_list_entries(wiki_path, root_path)
     if verify_quotes:
         check_quote_verification(root_path)
+    check_supersession(wiki_path, root_path)
+    open_contradictions = check_contradictions(wiki_path, root_path)
 
-    checks_run = "10 (structural)" if structural else "15+ (full)"
+    checks_run = "10 (structural)" if structural else "17+ (full)"
     report_path = outputs_path / f"lint-{TODAY_ISO}.md"
 
     lines = [
@@ -739,6 +991,12 @@ def lint(root: str, structural: bool = False, verify_quotes: bool = False) -> in
         ]
         for src in modified_sources:
             lines.append(f"- {src}")
+
+    if open_contradictions:
+        n = len(open_contradictions)
+        lines += ["", f"## Open Contradictions ({n} page{'' if n == 1 else 's'})", ""]
+        for page, count in open_contradictions:
+            lines.append(f"- {page} — {count} entr{'y' if count == 1 else 'ies'}")
 
     report_path.write_text("\n".join(lines), encoding="utf-8")
 
