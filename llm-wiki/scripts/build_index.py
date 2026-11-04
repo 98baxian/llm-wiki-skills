@@ -94,6 +94,33 @@ def slug_to_domain(slug: str, all_domains: list[str], fm: dict) -> str:
     return all_domains[0] if all_domains else "General"
 
 
+def superseded_ref(fm: dict) -> str:
+    """The page a ``superseded_by`` field points to, as ``category/slug`` ("" if none).
+    parse_frontmatter() has already stripped quotes and [[ ]]; drop a trailing comment,
+    a ``wiki/`` prefix, ``.md``, an alias and a heading."""
+    v = re.sub(r"(^|\s)#.*$", "", fm.get("superseded_by", "")).strip().strip("\"'[]").strip()
+    v = v.split("|")[0].split("#")[0].strip()
+    if v.startswith("wiki/"):
+        v = v[len("wiki/"):]
+    if v.endswith(".md"):
+        v = v[:-3]
+    return v.strip("/")
+
+
+def page_link(p: dict, in_table: bool = True) -> str:
+    """Wikilink to a page; a superseded page also names its replacement."""
+    sep = "\\|" if in_table else "|"
+    link = f"[[{p['rel']}{sep}{p['title']}]]"
+    if p.get("superseded_by"):
+        link += f" *(superseded → [[{p['superseded_by']}]])*"
+    return link
+
+
+def current(pages: list[dict]) -> list[dict]:
+    """Pages that are not superseded."""
+    return [p for p in pages if not p.get("superseded_by")]
+
+
 def collect_pages(wiki_path: Path, all_domains: list[str]) -> dict:
     """Collect all wiki pages grouped by type and domain."""
     pages: dict[str, list[dict]] = {
@@ -132,6 +159,7 @@ def collect_pages(wiki_path: Path, all_domains: list[str]) -> dict:
                 "domain_volatility": fm.get("domain_volatility", "medium"),
                 "entity_type": fm.get("entity_type", ""),
                 "date": fm.get("date", ""),
+                "superseded_by": superseded_ref(fm),
             })
 
     return pages
@@ -168,7 +196,7 @@ def build_domain_catalog(wiki_path: Path, domain: str, pages: dict,
                   "|------|-----------|---------------|---------|------------|"]
         for p in concepts_sorted:
             lines.append(
-                f"| [[{p['rel']}\\|{p['title']}]] "
+                f"| {page_link(p)} "
                 f"| {p['confidence']} "
                 f"| {p['last_reviewed'] or '—'} "
                 f"| {p['source_count']} "
@@ -187,7 +215,7 @@ def build_domain_catalog(wiki_path: Path, domain: str, pages: dict,
                   "|------|------|------|"]
         for p in entities_sorted:
             lines.append(
-                f"| [[{p['rel']}\\|{p['title']}]] "
+                f"| {page_link(p)} "
                 f"| {p['entity_type'] or '—'} "
                 f"| {p['date'] or '—'} |"
             )
@@ -204,7 +232,7 @@ def build_domain_catalog(wiki_path: Path, domain: str, pages: dict,
                   "|------|------|"]
         for p in sources_sorted:
             lines.append(
-                f"| [[{p['rel']}\\|{p['title']}]] "
+                f"| {page_link(p)} "
                 f"| {p['date'] or '—'} |"
             )
     else:
@@ -216,7 +244,7 @@ def build_domain_catalog(wiki_path: Path, domain: str, pages: dict,
     if synthesis:
         lines += [f"## Synthesis ({len(synthesis)})", ""]
         for p in synthesis:
-            lines.append(f"- [[{p['rel']}|{p['title']}]]")
+            lines.append(f"- {page_link(p, in_table=False)}")
         lines.append("")
 
     return "\n".join(lines)
@@ -275,7 +303,7 @@ def build_master_index(wiki_path: Path, pages: dict, all_domains: list[str]) -> 
     # Top 5 concepts per domain (by source_count)
     lines += ["## Top Concepts by Domain", ""]
     for d in all_domains:
-        domain_concepts = [p for p in pages["concepts"] if p["domain"] == d]
+        domain_concepts = [p for p in current(pages["concepts"]) if p["domain"] == d]
         if not domain_concepts:
             continue
         top5 = sorted(domain_concepts,
@@ -285,7 +313,7 @@ def build_master_index(wiki_path: Path, pages: dict, all_domains: list[str]) -> 
         lines.append("")
 
     # Recent sources (last 7 ingested by date)
-    all_sources = sorted(pages["sources"], key=lambda x: x.get("date", ""),
+    all_sources = sorted(current(pages["sources"]), key=lambda x: x.get("date", ""),
                          reverse=True)[:7]
     if all_sources:
         lines += ["## Recent Sources", ""]
@@ -294,9 +322,9 @@ def build_master_index(wiki_path: Path, pages: dict, all_domains: list[str]) -> 
         lines.append("")
 
     # Synthesis
-    if pages["synthesis"]:
+    if current(pages["synthesis"]):
         lines += ["## Synthesis", ""]
-        for p in pages["synthesis"][:10]:
+        for p in current(pages["synthesis"])[:10]:
             lines.append(f"- [[{p['rel']}|{p['title']}]]")
         lines.append("")
 

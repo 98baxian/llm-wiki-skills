@@ -216,9 +216,20 @@ $$
 When two sources contradict:
 
 1. State both claims explicitly
-2. Note which source supports each claim
+2. Note which source supports each claim — cite both sides **in the same entry** (one list
+   item, nested bullets allowed, or one table row), e.g.
+   `- Rate: 12% (raw/papers/a.md, L10) vs 30% (raw/papers/b.md, L4)`. On a source page the
+   page's own raw file counts as one side, so citing the other source is enough.
 3. Add to the article's "Contradictions" section AND `CLAUDE.md` research questions
 4. Do NOT silently pick one — contradictions are valuable signal
+
+Lint check 18 warns on an entry that cites fewer than two distinct sources (a raw citation and
+a `[[sources/...]]` link to the same source count once), suggests filling `CLAUDE.md`
+§ Open research questions when it is still empty, and lists every page with open
+contradictions in the report. Leave the section empty (or `None.`) when there are none. When
+a contradiction is settled, move the entry to the Evolution Log rather than leaving it in the
+section. When a newer page replaces an old one as a whole, that is supersession, not a
+contradiction: set `superseded_by` on the old page (schema-guide § Lifecycle fields).
 
 ---
 

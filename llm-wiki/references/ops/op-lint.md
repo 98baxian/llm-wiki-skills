@@ -33,12 +33,23 @@ The script runs 13+ checks. Output: `outputs/lint-YYYY-MM-DD.md`.
    the link resolves and the page is flagged for filling. It reports anything ambiguous as `UNRESOLVED`
    for you to decide, and quarantines template-placeholder tokens. Re-run `lint_wiki.py` after to confirm
    `broken-links` is clear. (Trigger words: fix links, repair links, maintain.)
-4. Ask whether to fix other flagged issues.
-5. If `search_tool: qmd` in CLAUDE.md `## Search`, re-sync the search index:
+4. Lifecycle and contradiction findings (fields: `references/schema-guide.md` § Lifecycle fields):
+   - `stale` "past stale_after" — re-read the page's cited `raw/` passages (or ingest a newer
+     source), update the facts, then set a new `stale_after` or remove it. Never just bump the
+     date without re-verifying.
+   - `supersession` — a missing or self-pointing `superseded_by` is an ERROR; fix the target or
+     clear the field. A cycle means no page is current: clear `superseded_by` on the page that
+     should stay. A chain warning names the final page; point the old page straight at it.
+   - `contradictions` — an entry cites fewer than two sources: add the missing side's citation
+     in the same entry (article-guide § Handling Contradictions). The report's
+     **Open Contradictions** section lists every page with open entries; mention the count to
+     the user, and add them to `CLAUDE.md` § Open research questions if lint suggests it.
+5. Ask whether to fix other flagged issues.
+6. If `search_tool: qmd` in CLAUDE.md `## Search`, re-sync the search index:
    ```bash
    qmd update
    ```
-6. Log: `## [HH:MM] lint | N issues found, M fixed`
+7. Log: `## [HH:MM] lint | N issues found, M fixed`
 
 ## Deep Lint (trigger: "deep lint" — monthly)
 

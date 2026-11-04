@@ -68,8 +68,8 @@ Execute in this order at the start of every session:
    ```bash
    python3 .claude/skills/llm-wiki/scripts/lint_wiki.py <wiki-root> --stale-only
    ```
-   If any pages are returned, show the list and ask: "These concept pages
-   haven't been reviewed recently — want me to add them to the freshen queue?"
+   If any pages are returned, show the list and ask: "These pages are past their
+   review limit or `stale_after` date — want me to add them to the freshen queue?"
 8. **qmd status** (only if `search_tool: qmd` in `CLAUDE.md` `## Search`; off by default):
    ```bash
    qmd status
@@ -383,6 +383,11 @@ Answer grounded in the wiki, not general knowledge. Navigate the index (qmd if
 `search_tool: qmd` is set in `CLAUDE.md`, else scan `wiki/index.md` → for a large wiki drill
 into `wiki/index/<domain>.md`), read the identified pages in full, follow one level of
 wikilinks, and also check `wiki/comparisons/`. Every claim traces to a specific source page.
+A page with `superseded_by` is retired: follow the pointer and answer from the current page
+(use the old one only for "what did we think before" questions). A page past its
+`stale_after` date must be re-verified against `raw/` before its facts are used, and named in
+the Confidence Notes. Open `## Contradictions` entries are part of the answer — report both
+sides rather than picking one.
 **Verify specifics (numbers / dates / quotes / legal-financial terms) against the cited
 `raw/` source**, not the compiled value (§ Compile vs. verify-fresh). If the wiki lacks the
 material, say so and suggest what to ingest — then, if you answer from general knowledge,
@@ -411,6 +416,10 @@ counts, then act on the findings:
   `<!-- FIX -->` on every citation to a modified source.
 - `broken-links` → `fix_links.py <wiki-root>` (dry run), then `--apply --stub` to repair and
   stub missing targets; re-run lint to confirm it's clear.
+- `stale` past `stale_after` → re-verify the page against `raw/`, then set a new
+  `stale_after` (or remove it). `supersession` → fix the `superseded_by` target; point a
+  chain at its final page. `contradictions` → cite the missing side in that entry. Field
+  details: `references/schema-guide.md` § Lifecycle fields.
 
 Log `## [HH:MM] lint | N issues found, M fixed`.
 

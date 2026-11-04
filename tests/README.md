@@ -30,6 +30,7 @@ pytest                    # from the repo root
 | `test_citations.py` | `citations.py` | the raw-citation grammar: ranges, lists, `p.N`, tolerant separators, malformed fragments |
 | `test_verify_quotes.py` | `verify_quotes.py` (facade) and `vq_extract.py`, `vq_match.py`, `vq_store.py` | quote extraction and binding, matching ladder, verdicts and severities, cache, report, CLI, `--flag` |
 | `test_cascade_flag.py` | `cascade_flag.py` | shared FIX inserter; output identical to the pre-refactor algorithm |
+| `test_lint_lifecycle.py` | `lint_wiki.py`, `build_index.py` | checks 6 / 17 / 18: `stale_after` expiry, `superseded_by` targets, chains and cycles, two-sided Contradictions entries, the Open Contradictions report section, superseded pages in the index |
 | `test_lint_verify_quotes.py` | `lint_wiki.py` | `--verify-quotes` level mapping; default run unchanged |
 | `test_verify_quotes_slow.py` | `verify_quotes.py` | 1 MB performance guard; opt-in pass over a vault copy (`VQ_REAL_VAULT`), `-m slow` |
 | `test_scaffold_and_hot.py` | `scaffold.py`, `lint_wiki.py` | scaffold structure, `hot.md` frontmatter, and the regression guard that lint treats `hot.md` as a system file (never an orphan/stale page) |

@@ -246,6 +246,29 @@ confidence: low
 ---
 ```
 
+### Lifecycle fields (optional, any page type)
+
+Two optional fields any wiki page may carry. Leave them out (or `""`) when they don't apply.
+
+```yaml
+stale_after: 2027-03-31             # YYYY-MM-DD: the page's facts are known to expire after this date
+superseded_by: "[[concepts/new-slug]]"   # this whole page is retired in favour of another page
+```
+
+| Field | Use when | Lint |
+|---|---|---|
+| `stale_after` | a page rests on facts with a known shelf life — prices, versions, quarterly figures, policies, guidelines | check 6 warns once the date has passed (also listed by `--stale-only`); check 1 warns if it is not a YYYY-MM-DD date |
+| `superseded_by` | a page is replaced as a whole — a merged duplicate concept, a newer synthesis, a revised personal writing | check 17: the target must exist (ERROR), must not be the page itself (ERROR), must not form a cycle (ERROR), and should be the *final* page of a chain (WARNING) |
+
+`superseded_by` accepts `[[category/slug]]`, `[[category/slug|Alias]]`, `category/slug`,
+`wiki/category/slug.md`, or a bare slug when it is unique. A superseded page is kept (history
+stays readable and citable) but it is never reported stale, `build_index.py` marks it
+`*(superseded → [[target]])*` in the domain catalog, and it is left out of the master index's
+top concepts, recent sources and synthesis lists. Use `superseded_by` for replaced *pages*;
+when two *sources* disagree, record it in the page's `## Contradictions` section instead
+(article-guide § Handling Contradictions). `possibly_outdated` (source summaries) stays as
+is: it is set automatically at ingest for sources older than two years.
+
 ### Domain Index (`wiki/index/<domain>.md`)
 
 ```yaml
