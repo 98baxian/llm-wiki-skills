@@ -65,3 +65,16 @@ def test_build_index_end_to_end(scaffolded_vault):
 
     # build_index must never rewrite the hot cache
     assert (wiki / "hot.md").read_text() == hot_before
+
+
+def test_comparisons_are_indexed(scaffolded_vault):
+    """Comparison pages must appear in their domain catalog (lint's index check requires it)."""
+    wiki = scaffolded_vault / "wiki"
+    (wiki / "comparisons").mkdir(exist_ok=True)
+    (wiki / "comparisons" / "a-vs-b.md").write_text(
+        "---\ntype: comparison\ntitle: A vs B\ndomain: AI\n---\n# A vs B\n"
+    )
+    assert build_index.build_index(str(scaffolded_vault)) == 0
+    catalog = (wiki / "index" / "ai.md").read_text()
+    assert "## Comparisons (1)" in catalog
+    assert "comparisons/a-vs-b" in catalog

@@ -128,9 +128,10 @@ def collect_pages(wiki_path: Path, all_domains: list[str]) -> dict:
         "entities": [],
         "sources": [],
         "synthesis": [],
+        "comparisons": [],
     }
 
-    for subdir in ("concepts", "entities", "sources", "synthesis"):
+    for subdir in ("concepts", "entities", "sources", "synthesis", "comparisons"):
         target = wiki_path / subdir
         if not target.exists():
             continue
@@ -174,6 +175,7 @@ def build_domain_catalog(wiki_path: Path, domain: str, pages: dict,
     entities = [p for p in pages["entities"] if p["domain"] == domain]
     sources = [p for p in pages["sources"] if p["domain"] == domain]
     synthesis = [p for p in pages["synthesis"] if p["domain"] == domain]
+    comparisons = [p for p in pages["comparisons"] if p["domain"] == domain]
 
     lines = [
         "---",
@@ -240,6 +242,13 @@ def build_domain_catalog(wiki_path: Path, domain: str, pages: dict,
 
     lines.append("")
 
+    # Comparisons
+    if comparisons:
+        lines += [f"## Comparisons ({len(comparisons)})", ""]
+        for p in comparisons:
+            lines.append(f"- {page_link(p, in_table=False)}")
+        lines.append("")
+
     # Synthesis
     if synthesis:
         lines += [f"## Synthesis ({len(synthesis)})", ""]
@@ -259,10 +268,10 @@ def build_master_index(wiki_path: Path, pages: dict, all_domains: list[str]) -> 
 
     # Count per domain
     domain_counts: dict[str, dict[str, int]] = {
-        d: {"concepts": 0, "entities": 0, "sources": 0, "synthesis": 0}
+        d: {"concepts": 0, "entities": 0, "sources": 0, "synthesis": 0, "comparisons": 0}
         for d in all_domains
     }
-    for ptype in ("concepts", "entities", "sources", "synthesis"):
+    for ptype in ("concepts", "entities", "sources", "synthesis", "comparisons"):
         for p in pages[ptype]:
             d = p["domain"]
             if d in domain_counts:
@@ -357,7 +366,7 @@ def build_index(root: str) -> int:
         catalog_path = index_dir / f"{d_slug}.md"
         catalog_path.write_text(catalog, encoding="utf-8")
         dc = sum(
-            1 for ptype in ("concepts", "entities", "sources", "synthesis")
+            1 for ptype in ("concepts", "entities", "sources", "synthesis", "comparisons")
             for p in pages[ptype] if p["domain"] == domain
         )
         print(f"  ✓ wiki/index/{d_slug}.md — {dc} entries")

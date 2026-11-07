@@ -61,6 +61,14 @@ LOG_FILENAME_RE = re.compile(r"^(\d{4})(\d{2})(\d{2})\.md$")
 FRONTMATTER_RE = re.compile(r"^---\n(.*?)\n---\n", re.DOTALL)
 CITATION_RE = re.compile(r"\(raw/[^)]+,\s*(L\d|p\.\d)|location unknown\)|\[synthesis\]")
 FACTUAL_LINE_RE = re.compile(r"^[-•]\s.{50,}$|^\d+\.\s.{50,}$")
+CJK_CHAR_RE = re.compile(r"[\u3400-\u9fff]")
+# Bookkeeping sections whose bullets are change-log entries, not factual claims.
+EVOLUTION_LOG_HEADINGS = {"evolution log", "演化日志"}
+# Bullets that are navigation / bookkeeping rather than claims: a bullet that starts with a
+# wikilink, an ISO date or a `raw/...` path. Wikilinks are also stripped before the
+# 50-char length test, so "- label: [[a/b]]" is not a claim.
+NON_CLAIM_BULLET_RE = re.compile(r"^(?:[-•]|\d+\.)\s*(?:\[\[|\d{4}-\d{2}-\d{2}|`raw/)")
+WIKILINK_RE_ANY = re.compile(r"\[\[[^\]]*\]\]")
 # A source-page wikilink used as an inline citation, e.g. "([[sources/foo]], L10)".
 # Citations must point to raw/ evidence, not a compiled summary page (see check 14).
 SRC_WIKILINK_CITATION_RE = re.compile(r"\(\s*\[\[sources/[^\]]+\]\]\s*,\s*(?:L\d|p\.\d)")
@@ -364,7 +372,8 @@ def check_index(wiki_dir: Path, root: Path) -> None:
 def check_stubs(wiki_dir: Path, root: Path) -> None:
     for f in wiki_files(wiki_dir):
         _, body = parse_frontmatter(f)
-        if len(body.split()) < 80:
+        # CJK text has no spaces, so split() undercounts it: add ~1 word per 2 CJK chars.
+        if len(body.split()) + len(CJK_CHAR_RE.findall(body)) // 2 < 80:
             log_issue("WARNING", "stubs",
                       f"{f.relative_to(root)} — under 80 words (stub)")
 
@@ -470,7 +479,7 @@ def check_near_duplicates(wiki_dir: Path) -> None:
     concepts_dir = wiki_dir / "concepts"
     if not concepts_dir.exists():
         return
-    slugs = [f.stem for f in concepts_dir.rglob("*.md")]
+    slugs = [f.stem for f in concepts_dir.rglob("*.md") if f.stem != "index"]
     for i, s1 in enumerate(slugs):
         for s2 in slugs[i + 1:]:
             if jaccard(s1, s2) > 0.7:
@@ -494,11 +503,13 @@ def check_uncited(wiki_dir: Path, root: Path) -> None:
             for line in body.splitlines():
                 stripped = line.strip()
                 if stripped.startswith("#"):
-                    skip_section = stripped.lstrip("#").strip().lower() == "evolution log"
+                    skip_section = stripped.lstrip("#").strip().lower() in EVOLUTION_LOG_HEADINGS
                     continue
                 if skip_section:
                     continue
-                if FACTUAL_LINE_RE.match(stripped) and not CITATION_RE.search(stripped):
+                if (FACTUAL_LINE_RE.match(stripped) and not CITATION_RE.search(stripped)
+                        and not NON_CLAIM_BULLET_RE.match(stripped)
+                        and len(WIKILINK_RE_ANY.sub("", stripped)) >= 50):
                     preview = (stripped[:60] + "...") if len(stripped) > 60 else stripped
                     log_issue("WARNING", "uncited",
                               f'{f.relative_to(root)} — possible uncited: "{preview}"')
