@@ -46,6 +46,39 @@ Then reference it in your agent config, or simply paste `llm-wiki/SKILL.md` into
 
 > `scaffold.py` also **bundles a copy of the skill into each new vault** at `<wiki-root>/.claude/skills/llm-wiki/`, so a scaffolded vault is self-contained — its documented `.claude/skills/llm-wiki/scripts/...` commands resolve locally and you can move or share the vault without a separate install.
 
+### Optional: one shared install, linked into every vault
+
+Instead of a copy per vault (kept current with `sync-skill.sh`), keep one stable checkout
+and symlink it everywhere. Updating it once updates every linked vault; no sync step.
+The trade-off: a linked vault is tied to this machine (the link is an absolute path), and
+every vault runs whatever that checkout has — so keep it separate from a clone you develop in.
+
+```bash
+git clone https://github.com/98baxian/llm-wiki-skills ~/.local/share/llm-wiki-skills
+ln -sfn ~/.local/share/llm-wiki-skills/llm-wiki ~/.claude/skills/llm-wiki   # global (must not be a real dir)
+
+# new vault: link instead of copy
+python3 ~/.local/share/llm-wiki-skills/llm-wiki/scripts/scaffold.py ~/my-wiki "My Topic" --link-skill
+
+# update every linked vault at once
+git -C ~/.local/share/llm-wiki-skills pull
+```
+
+`--link-skill` with no path links to the skill that `scaffold.py` belongs to; `--link-skill PATH`
+links to another skill folder. Scaffold never writes through an existing link and never deletes an
+existing copy. To convert a vault that already has a bundled copy, do **not** re-run
+`scaffold.py` (it rewrites `CLAUDE.md`, `wiki/index.md`, `wiki/hot.md` and the other system
+files). Move the copy **out of `.claude/skills/`** (a backup left there would load as a second
+`llm-wiki` skill) and create the link by hand:
+
+```bash
+cd ~/my-wiki
+mv .claude/skills/llm-wiki ~/llm-wiki-skill-backup
+ln -s ~/.local/share/llm-wiki-skills/llm-wiki .claude/skills/llm-wiki
+```
+
+`sync-skill.sh` skips linked vaults.
+
 ## Quick start
 
 ```bash

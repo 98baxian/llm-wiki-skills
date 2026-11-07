@@ -263,7 +263,9 @@ Creates the full directory tree, `CLAUDE.md` (the single config + schema file),
 the new vault** (`<wiki-root>/.claude/skills/llm-wiki/` — SKILL.md + references/ +
 scripts/), so the vault is self-contained: its documented
 `.claude/skills/llm-wiki/scripts/...` commands resolve locally and you can move or
-share the vault without a separate install. See the script's docstring for details.
+share the vault without a separate install. With `--link-skill [PATH]` it creates a symlink to a
+shared skill install instead (no per-vault copy to keep in sync, but the vault is tied to this
+machine). See the script's docstring for details.
 
 After scaffolding:
 1. Review and customize `CLAUDE.md` — define scope, naming conventions.
@@ -482,7 +484,8 @@ Log: `## [HH:MM] compile | <what you did>`
 > Config lives in `CLAUDE.md` (the single config + schema file) — edit it directly;
 > there is no separate config file or sync step. After changing the domain list,
 > re-run `build_index.py` so the per-domain catalogs match. To update a vault's
-> bundled skill copy, copy the skill folder over (`cp -R`).
+> bundled skill copy, copy the skill folder over (`cp -R`); a vault whose
+> `.claude/skills/llm-wiki` is a symlink (`scaffold.py --link-skill`) updates with its install.
 
 ---
 
