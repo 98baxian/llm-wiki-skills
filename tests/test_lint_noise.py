@@ -81,3 +81,47 @@ def test_similar_slugs_still_flagged(tmp_path):
     _page(tmp_path, "concepts/risk-models.md", "# R\n")
     out = _issues(tmp_path, lambda r: lint_wiki.check_near_duplicates(r / "wiki"))
     assert len(out) == 1
+
+
+# ── contradiction placeholders ───────────────────────────────────────────────
+
+def test_dressed_up_placeholders_are_not_contradictions():
+    for marker in ("*(暂无)*", "（无）", "_None yet_", "*(none)*", "N/A", "暂无。"):
+        body = f"## Contradictions\n\n{marker}\n"
+        assert lint_wiki.contradiction_entries(body) == [], marker
+
+
+def test_real_contradiction_entry_is_still_listed():
+    body = "## Contradictions\n\nSource A says 5, source B says 7.\n"
+    assert len(lint_wiki.contradiction_entries(body)) == 1
+
+
+# ── claims_requiring_verification with ellipsis ──────────────────────────────
+
+def _source_with_claim(root, claim, raw_text):
+    raw = root / "raw" / "x.md"
+    raw.parent.mkdir(parents=True, exist_ok=True)
+    raw.write_text(raw_text, encoding="utf-8")
+    p = root / "wiki" / "sources" / "s.md"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(
+        "---\ntype: source-summary\ntitle: S\nraw_file: raw/x.md\n"
+        f"claims_requiring_verification:\n  - \"{claim}\" (raw/x.md, L1)\n---\n# S\n",
+        encoding="utf-8",
+    )
+
+
+def _claim_errors(root):
+    _reset()
+    lint_wiki.check_claims_verification(root / "wiki", root)
+    return list(lint_wiki.errors)
+
+
+def test_claim_with_ellipsis_checks_each_fragment(tmp_path):
+    _source_with_claim(tmp_path, "亚马逊...最多五百亿", "亚马逊都是核心投资人，承诺最多五百亿。")
+    assert _claim_errors(tmp_path) == []
+
+
+def test_claim_with_ellipsis_still_fails_when_a_fragment_is_missing(tmp_path):
+    _source_with_claim(tmp_path, "亚马逊...最多九百亿", "亚马逊都是核心投资人，承诺最多五百亿。")
+    assert len(_claim_errors(tmp_path)) == 1
