@@ -76,6 +76,8 @@ SRC_WIKILINK_CITATION_RE = re.compile(r"\(\s*\[\[sources/[^\]]+\]\]\s*,\s*(?:L\d
 DEDUP_LIST_SECTIONS = {"concepts extracted", "entities extracted", "sources"}
 LIST_LINK_RE = re.compile(r"^[-*]\s*\[\[([^\]|#]+)")
 # Format: "verbatim text" (raw/path/file.md, L42)
+# A quote may join non-adjacent passages with an ellipsis ("A...B"); each side is checked on its own.
+CLAIM_ELLIPSIS_RE = re.compile(r"\[\s*(?:\.{3}|…)\s*\]|\.{3,}|…+|⋯+")
 CLAIM_ENTRY_RE = re.compile(r'^"([^"]+)"\s*\(([^,)]+),\s*(L\d+[^)]*|p\.\d+[^)]*)\)')
 
 AUDIT_REQUIRED_FIELDS = {
@@ -97,6 +99,18 @@ CONTRADICTION_PLACEHOLDERS = {
     "none", "none.", "(none)", "*(none)*", "_none_", "none yet", "(none yet)", "*(none yet)*",
     "n/a", "-", "—", "无", "无。", "暂无",
 }
+
+_PLACEHOLDER_WRAP_RE = re.compile(r"[\s*_()（）\[\]。.]+")
+_PLACEHOLDER_BARE = {re.sub(_PLACEHOLDER_WRAP_RE, "", p.lower()) for p in CONTRADICTION_PLACEHOLDERS}
+_PLACEHOLDER_BARE.discard("")
+
+
+def _is_placeholder(text: str) -> bool:
+    """True for an empty-section marker however it is dressed: ``None``, ``*(none)*``,
+    ``*(暂无)*``, ``（无）``, ``_none yet_`` ..."""
+    low = text.strip().lower()
+    return low in CONTRADICTION_PLACEHOLDERS or re.sub(_PLACEHOLDER_WRAP_RE, "", low) in _PLACEHOLDER_BARE
+
 
 TODAY = datetime.date.today()
 TODAY_ISO = TODAY.isoformat()
@@ -659,7 +673,8 @@ def check_claims_verification(wiki_dir: Path, root: Path) -> None:
                           f"{f.relative_to(root)} — raw file not found: {raw_rel}")
                 continue
             raw_text = raw_path.read_text(encoding="utf-8", errors="replace")
-            if not textnorm.contains(raw_text, verbatim):
+            fragments = [s.strip() for s in CLAIM_ELLIPSIS_RE.split(verbatim) if len(s.strip()) >= 2]
+            if not fragments or not all(textnorm.contains(raw_text, frag) for frag in fragments):
                 log_issue("ERROR", "claims-verification",
                           f"{f.relative_to(root)} — verbatim claim NOT FOUND in {raw_rel}: "
                           f"\"{verbatim}\"")
@@ -844,7 +859,7 @@ def contradiction_entries(body: str) -> list[str]:
             last_item = None
             entries.append(current)
     texts = [" ".join(e).strip() for e in entries]
-    return [t for t in texts if t.lower() not in CONTRADICTION_PLACEHOLDERS]
+    return [t for t in texts if not _is_placeholder(t)]
 
 
 def contradiction_sides(entry: str, own_raw: str, source_raw: dict[str, str]) -> set[str]:
